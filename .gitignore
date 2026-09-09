@@ -46,7 +46,13 @@ docs/*
 !docs/agent-automation-efficiency.md
 !docs/dokploy-deployment.md
 !docs/feishu-bot-notification-design.md
+!docs/superpowers/
+!docs/superpowers/specs/
+!docs/superpowers/specs/2026-07-20-audit-demo-log-sender-design.md
 v1.5/
+
+# Local-only demo verification; keep the runnable production script tracked.
+/test/send-audit-demo-logs.test.js
 
 # OS/editor noise
 .DS_Store

@@ -11,7 +11,8 @@
     "query": "node scripts/query.js",
     "report": "node scripts/report.js",
     "server": "node scripts/server.js",
-    "benchmark:audit": "node scripts/benchmark-audit-review.js"
+    "benchmark:audit": "node scripts/benchmark-audit-review.js",
+    "demo:audit-logs": "node scripts/send-audit-demo-logs.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
