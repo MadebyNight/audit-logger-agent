@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<title>V1.1 Agent 页</title></head><body>
+
+<div class="chrome">
+  <span class="brand">AUDIT LOGGER</span>
+  <span class="nav"><span>Agent</span><span>风险发现</span><span>审查批次</span></span>
+</div>
+
+<div class="wrap">
+  <div class="kicker">AGENT</div>
+  <h1>MT Agent</h1>
+  <div class="sub">4 位发起人 · 13 个任务</div>
+
+  <div class="toolbar">
+    <span class="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>按发起人筛选</span>
+    <span class="toggle"><span>全部展开</span><span>全部折叠</span></span>
+  </div>
+
+  <div class="list">
+    <div class="group open">
+      <div class="group-head">
+        <span class="name" style="flex:1">张三</span>
+        <span class="num">7 任务</span>
+        <span class="num">14:48</span>
+        <span class="icon" style="color:var(--ok)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></span>
+      </div>
+      <div class="group-body">
+        <div class="task-line">
+          <span class="pill in-progress" style="min-width:56px;text-align:center">审查中</span>
+          <span class="t">同步本月渠道库存</span>
+          <span class="time" style="min-width:48px">14:48</span>
+        </div>
+        <div class="task-line">
+          <span class="pill resolved" style="min-width:56px;text-align:center">已完成</span>
+          <span class="t">导出上周订单明细</span>
+          <span class="time" style="min-width:48px">14:32</span>
+        </div>
+        <div class="task-line">
+          <span class="pill attention" style="min-width:56px;text-align:center">需要介入</span>
+          <span class="t">重建索引并回滚到昨日快照</span>
+          <span class="time" style="min-width:48px">13:05</span>
+        </div>
+        <div class="task-line">
+          <span class="pill unconfirmed" style="min-width:56px;text-align:center">待确认</span>
+          <span class="t">同步供应商报价表</span>
+          <span class="time" style="min-width:48px">12:40</span>
+        </div>
+        <div class="task-line">
+          <span class="pill resolved" style="min-width:56px;text-align:center">已完成</span>
+          <span class="t">校验商品映射表</span>
+          <span class="time" style="min-width:48px">11:20</span>
+        </div>
+        <div class="task-line">
+          <span class="pill unconfirmed" style="min-width:56px;text-align:center">待确认</span>
+          <span class="t">重建订单索引</span>
+          <span class="time" style="min-width:48px">10:15</span>
+        </div>
+        <div class="task-line">
+          <span class="pill unreviewed" style="min-width:56px;text-align:center">未审查</span>
+          <span class="t">批量导出渠道对账单</span>
+          <span class="time" style="min-width:48px">8 天前</span>
+        </div>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-head">
+        <span class="name" style="flex:1">李四</span>
+        <span class="num">3 任务</span>
+        <span class="num">昨天</span>
+        <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-head">
+        <span class="name" style="flex:1">王五</span>
+        <span class="num">2 任务</span>
+        <span class="num">3 天前</span>
+        <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-head">
+        <span class="name" style="flex:1">发起人未知</span>
+        <span class="pill unconfirmed">上下文不完整</span>
+        <span class="num">1 任务</span>
+        <span class="num">8 天前</span>
+        <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="footnote">分组键是 requester_id。缺失该字段的历史任务进入“发起人未知”分组。默认展开第一个分组，展开态有独立可分享 URL。</div>
+</div>
+
+</body></html>

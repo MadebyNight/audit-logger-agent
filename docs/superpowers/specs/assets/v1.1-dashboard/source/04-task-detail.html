@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><link rel="stylesheet" href="base.css">
+<title>V1.1 任务详情页</title></head><body>
+
+<div class="chrome">
+  <span class="brand">AUDIT LOGGER</span>
+  <span class="nav"><span>Agent</span><span>风险发现</span><span>审查批次</span></span>
+</div>
+
+<div class="wrap" style="max-width:860px">
+  <div class="kicker">TRACE / 7f3a91c2</div>
+
+  <div class="verdict">
+    <h2>任务失败</h2>
+    <span class="pills">
+      <span class="pill attention">高风险</span>
+      <span class="pill tag">任务中断</span>
+    </span>
+    <div class="note">需要人工介入</div>
+  </div>
+
+  <div class="section-label">任务上下文</div>
+  <dl class="kv">
+    <dt>发起人</dt><dd>张三</dd>
+    <dt>原始请求</dt><dd>重建索引并回滚到昨日快照</dd>
+    <dt>预期目的</dt><dd>恢复索引可用状态</dd>
+    <dt>执行结果</dt><dd>回滚阶段连接超时，未完成</dd>
+  </dl>
+
+  <div class="section-label">Agent 审计结果</div>
+  <div class="card">
+    <div style="font-size:12.5px;color:#C5D2DC">回滚命令执行后连接超时，链路无终止事件。</div>
+    <div class="sub" style="margin-top:7px">批次 2026-09-14T13:05 · LLM 审查</div>
+  </div>
+
+  <div class="section-label">证据链</div>
+  <div class="evidence">
+    <div>13:05:02　run.start　shell</div>
+    <div>13:05:09　tool.start　rebuild_index</div>
+    <div>13:05:44　tool.end　rebuild_index　OK</div>
+    <div>13:06:12　tool.start　rollback_snapshot</div>
+    <div class="bad">13:06:41　tool.error　timeout</div>
+    <div class="bad">13:06:41　无终止事件</div>
+  </div>
+
+  <div class="fold"><span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span>原始日志（42 条事件）</div>
+
+  <div class="footnote">五段顺序固定：任务结论 → 任务上下文 → Agent 审计结果 → 证据链 → 原始日志（默认折叠）。<br>
+  单栏顺序阅读，窄屏不降级。</div>
+</div>
+
+</body></html>

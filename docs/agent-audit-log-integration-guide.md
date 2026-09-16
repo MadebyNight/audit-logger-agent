@@ -389,6 +389,32 @@ Agent 日志入口：http://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-1
 | `error.message` | 失败原因的简短文本；失败类别由 `status` 表示 |
 | `tags` | 字符串数组；只使用稳定、可查询的标签 |
 
+### 5.2.1 V1.1 任务级字段
+
+为支持按完整 Trace 审计，事件规范新增以下结构化字段：
+
+| 字段 | 类型与要求 | 事件归属 |
+| --- | --- | --- |
+| `requester_id` | 稳定且已脱敏的用户标识 | `run.start` 必填；同一 Trace 后续事件可继承或重复携带 |
+| `original_request` | 用户原始请求摘要或正文；必须脱敏并遵守长度限制 | `run.start` 必填 |
+| `expected_purpose` | Agent 预期完成的任务目的摘要；可选增强字段 | 可选；缺省不影响接收，也不使 Trace 变为上下文不完整 |
+| `agent_result` | Agent 最终执行结果或失败摘要 | `run.final_result`、`run.failed` 必填；失败事件填写失败原因 |
+
+V1.1 的必填任务级字段是 `requester_id`、`original_request`、`agent_result` 三个；`expected_purpose` 属于可选增强，用于对比用户诉求与 Agent 自述目的，缺省不阻断接入。这些字段不要求每条 `tool.*` 事件重复携带完整请求文本。服务端会按 `trace_id` 归并并在批量读取 API、Dashboard 和审计证据中提供。历史事件缺少这些字段时保留为空，不回填猜测值。
+
+服务端按 Agent 决定上述必填校验的强度（接收模式），解析优先级从高到低：
+
+1. 该 Agent 在服务端 `config.agents[agentId].ingestMode` 中的独立设置；
+2. 服务端环境变量 `AUDIT_INGEST_STRICT_MODE`（全局默认）；
+3. 内置默认 `compat`。
+
+| 模式 | 对接入方的实际影响 |
+| --- | --- |
+| `compat`（默认） | 类型或长度非法仍会拒绝该条事件；任务字段缺失不拒绝，事件照常入库，对应 Trace 标记为"任务上下文不完整" |
+| `strict` | `run.start` 缺 `requester_id`/`original_request`，或 `run.final_result`/`run.failed` 缺 `agent_result` 时，该条事件返回 400 `missing_required_task_field` 被拒绝；缺 `expected_purpose` 不在拒绝范围内 |
+
+接入方无需主动申请模式切换：新接入在验收阶段会由服务端切到 `strict` 验证，验收通过后该 Agent 固定在 `strict` 模式运行。两种模式下，类型、长度和请求体积非法都会同步拒绝，差异只在必填字段缺失时的行为。
+
 字段迁移规则：
 
 - 旧 `product_id` 改为 `entity: { "type": "product", "id": "..." }`；服务端会拒收带 `product_id` 的事件。
@@ -404,10 +430,12 @@ HTTP ingest 的八个基础字段只保证“事件可接收”，不能保证�
 
 | 事件或场景 | 条件必填内容 |
 | --- | --- |
-| `run.start` | 任务目标、触发来源；使用 Run 根 Span |
+| `run.start` | 任务目标、触发来源、`requester_id`、`original_request`；使用 Run 根 Span。`expected_purpose` 为可选补充 |
 | `agent.start` | `parent_span_id`；`llm_intent.input` 写目标与约束，`output` 写计划或下一步动作摘要 |
 | `tool.start` | `parent_span_id`；`llm_intent.input` 写触发上下文摘要，`output` 写调用原因和预期影响 |
 | `tool.end`/`tool.error` | `duration_ms`；实际结果或失败摘要 |
+| `run.final_result` | `agent_result`；任务成功结果摘要 |
+| `run.failed` | `agent_result`；任务失败原因摘要 |
 | `run.waiting_user` | 决策标识、待确认摘要、确认对象摘要或哈希 |
 | `run.resume` | 相同决策标识、用户选择和已脱敏的决定人标识 |
 | 高风险执行 | 授权引用和与预览一致的确认对象摘要或哈希 |
