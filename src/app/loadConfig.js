@@ -33,6 +33,16 @@ export function loadAppConfig(rootDir, { env = process.env } = {}) {
   const dashboardBaseUrl = typeof env.AUDIT_AGENT_DASHBOARD_BASE_URL === 'string'
     ? env.AUDIT_AGENT_DASHBOARD_BASE_URL.trim()
     : '';
+  if (config.auditReview?.http?.requireHttpsBaseUrl === true) {
+    let validHttpsUrl = false;
+    try {
+      const url = new URL(dashboardBaseUrl);
+      validHttpsUrl = url.protocol === 'https:' && Boolean(url.hostname);
+    } catch {}
+    if (!validHttpsUrl) {
+      throw new Error('AUDIT_AGENT_DASHBOARD_BASE_URL must be a valid HTTPS URL when auditReview.http.requireHttpsBaseUrl is enabled');
+    }
+  }
   if (dashboardBaseUrl) {
     config.auditReview = {
       ...(config.auditReview ?? {}),

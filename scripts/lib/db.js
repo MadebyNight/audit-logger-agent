@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import path from 'path';
+import { countRedactionHits } from './parser.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -22,6 +23,8 @@ CREATE TABLE IF NOT EXISTS audit_events (
   original_request TEXT,
   agent_result TEXT,
   expected_purpose TEXT,
+  ingested_at TEXT,
+  redaction_hits INTEGER,
   entity_type TEXT,
   entity_id TEXT,
   llm_intent_json TEXT,
@@ -127,6 +130,9 @@ function addColumnIfMissing(db, table, column, definition) {
 }
 
 function migrateAuditEvents(db) {
+  addColumnIfMissing(db, 'audit_events', 'ingested_at', 'TEXT');
+  addColumnIfMissing(db, 'audit_events', 'redaction_hits', 'INTEGER');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_audit_events_ingested ON audit_events(ingested_at, id);');
   addColumnIfMissing(db, 'audit_events', 'requester_id', 'TEXT');
   addColumnIfMissing(db, 'audit_events', 'original_request', 'TEXT');
   addColumnIfMissing(db, 'audit_events', 'agent_result', 'TEXT');
@@ -164,6 +170,8 @@ export function insertEvents(db, events) {
     'original_request',
     'agent_result',
     'expected_purpose',
+    'ingested_at',
+    'redaction_hits',
     'entity_type',
     'entity_id',
     'llm_intent_json',
@@ -194,6 +202,7 @@ export function insertEvents(db, events) {
         original_request: null,
         agent_result: null,
         expected_purpose: null,
+        redaction_hits: 0,
         entity_type: null,
         entity_id: null,
         llm_intent_json: null,
@@ -206,6 +215,8 @@ export function insertEvents(db, events) {
         mapping_version: null,
         mapped_at: null,
         ...row,
+        ingested_at: new Date().toISOString(),
+        redaction_hits: countRedactionHits(row),
         row_hash: rowHash,
       };
       const filteredValues = Object.fromEntries(insertColumns.map((column) => [column, values[column]]));

@@ -10,13 +10,13 @@ test('dashboard base URL environment variable overrides container configuration'
   const config = loadAppConfig(process.cwd(), {
     env: {
       AUDIT_AGENT_CONFIG_PATH: 'config.container.json',
-      AUDIT_AGENT_DASHBOARD_BASE_URL: '  http://audit.example.test  ',
+      AUDIT_AGENT_DASHBOARD_BASE_URL: '  https://audit.example.test  ',
     },
   });
 
   assert.equal(
     config.auditReview.visualization.baseUrl,
-    'http://audit.example.test',
+    'https://audit.example.test',
   );
 });
 
@@ -70,6 +70,23 @@ test('per-agent ingestMode is preserved independently of environment default', (
 
     assert.equal(config.ingest.defaultMode, 'compat');
     assert.equal(config.agents['agent-a'].ingestMode, 'strict');
+  } finally {
+    fs.rmSync(rootDir, { recursive: true, force: true });
+  }
+});
+
+
+test('HTTPS startup guard is explicit and requires a valid environment URL', () => {
+  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-https-config-'));
+  try {
+    const file = path.join(rootDir, 'config.json');
+    fs.writeFileSync(file, JSON.stringify({ auditReview: { http: { requireHttpsBaseUrl: true } } }));
+    for (const value of ['', 'http://localhost:9320', 'https://', 'not-a-url']) {
+      assert.throws(() => loadAppConfig(rootDir, { env: { AUDIT_AGENT_DASHBOARD_BASE_URL: value } }), /valid HTTPS URL/);
+    }
+    assert.equal(loadAppConfig(rootDir, { env: { AUDIT_AGENT_DASHBOARD_BASE_URL: 'https://audit.example.test' } }).auditReview.visualization.baseUrl, 'https://audit.example.test');
+    fs.writeFileSync(file, '{}');
+    assert.equal(loadAppConfig(rootDir, { env: { AUDIT_AGENT_DASHBOARD_BASE_URL: 'http://localhost:9320' } }).auditReview.visualization.baseUrl, 'http://localhost:9320');
   } finally {
     fs.rmSync(rootDir, { recursive: true, force: true });
   }

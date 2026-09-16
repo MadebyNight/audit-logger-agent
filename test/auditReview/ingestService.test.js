@@ -5,6 +5,7 @@ import os from 'os';
 import path from 'path';
 import Database from 'better-sqlite3';
 
+import { validateLogEntry, normalizeEntry } from '../../scripts/lib/parser.js';
 import { openDb, insertEvents } from '../../scripts/lib/db.js';
 import { ensureReviewSchema } from '../../src/db/reviewSchema.js';
 import { createIngestCursorStore } from '../../src/auditReview/ingestCursorStore.js';
@@ -297,4 +298,62 @@ test('readIncrementalChunk: returns empty chunk when offset >= size', () => {
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+
+test('spool uses per-agent strict validation and persists compat redaction metrics', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-task-spool-'));
+  const db = openDb(':memory:');
+  try {
+    ensureReviewSchema(db);
+    const logDir = path.join(tmpDir, 'incoming', 'test-agent');
+    fs.mkdirSync(logDir, { recursive: true });
+    const file = path.join(logDir, 'audit-2026-07-03.jsonl');
+    fs.writeFileSync(file, [
+      makeLine({ event: 'run.start' }),
+      makeLine({ requester_id: {} }),
+      makeLine({ requester_id: 'user@example.test' }),
+      makeLine({ event: 'run.final_result', agent_result: 'done', trace_id: 'valid' }),
+    ].join('\n') + '\n');
+    const config = makeConfig(logDir, path.join(tmpDir, 'audit.db'));
+    config.agents = { 'test-agent': { ingestMode: 'strict' } };
+    const service = createAuditIngestService({ db, config, cursorStore: createIngestCursorStore(db) });
+    const result = service.ingestSince({ sinceDate: '2026-07-03' });
+    assert.equal(result.inserted, 1);
+    assert.equal(result.parseErrors.length, 4);
+    config.agents['test-agent'].ingestMode = 'compat';
+    fs.appendFileSync(file, makeLine({ requester_id: 'user@example.test', trace_id: 'compat' }) + '\n');
+    assert.equal(service.ingestSince({ sinceDate: '2026-07-03' }).inserted, 1);
+    const row = db.prepare("SELECT * FROM audit_events WHERE trace_id = 'compat'").get();
+    assert.equal(row.redaction_hits, 1);
+    assert.match(row.ingested_at, /^\d{4}-.*Z$/);
+  } finally {
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+
+test('task field limits follow chapter 8 and public inserts assign server metadata', () => {
+  for (const [field, limit] of Object.entries({ requester_id: 128, original_request: 2000, expected_purpose: 1000, agent_result: 2000 })) {
+    const event = JSON.parse(makeLine({ [field]: 'x'.repeat(limit) }));
+    assert.deepEqual(validateLogEntry(event, 1), []);
+    event[field] += 'x';
+    assert.equal(validateLogEntry(event, 1)[0].code, 'field_too_long');
+    event[field] = [];
+    assert.equal(validateLogEntry(event, 1)[0].code, 'invalid_field_type');
+  }
+  const db = openDb(':memory:');
+  try {
+    const row = normalizeEntry(JSON.parse(makeLine({ requester_id: 'a@example.test', original_request: 'request', expected_purpose: 'purpose', agent_result: 'result' })));
+    row.ingested_at = '1900-01-01';
+    row.redaction_hits = 999;
+    assert.equal(insertEvents(db, [row]), 1);
+    const stored = db.prepare('SELECT * FROM audit_events').get();
+    assert.equal(stored.redaction_hits, 1);
+    assert.notEqual(stored.ingested_at, row.ingested_at);
+    for (const field of ['requester_id', 'original_request', 'expected_purpose', 'agent_result']) assert.equal(stored[field], row[field]);
+    assert.equal(insertEvents(db, [row]), 0);
+    assert.equal(db.prepare('SELECT ingested_at FROM audit_events').get().ingested_at, stored.ingested_at);
+  } finally { db.close(); }
 });

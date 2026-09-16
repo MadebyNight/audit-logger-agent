@@ -9,6 +9,19 @@ import {
 
 const DEFAULT_MAX_LINE_BYTES = 64 * 1024;
 
+export function resolveIngestMode(config = {}, agentId) {
+  return config.agents?.[agentId]?.ingestMode
+    ?? config.ingest?.defaultMode
+    ?? (process.env.AUDIT_INGEST_STRICT_MODE?.trim().toLowerCase() === 'strict' ? 'strict' : 'compat');
+}
+
+export function countRedactionHits(entry) {
+  // One combined pattern prevents a phone-like substring inside an ID being counted twice.
+  const pattern = /(?<!\d)(?:\d{17}[\dXx]|1[3-9]\d{9})(?!\d)|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+  return Object.keys(TASK_FIELDS).reduce((total, field) => total
+    + (typeof entry[field] === 'string' ? [...entry[field].matchAll(pattern)].length : 0), 0);
+}
+
 function hasOwn(obj, key) {
   return Object.prototype.hasOwnProperty.call(obj, key);
 }
@@ -120,6 +133,14 @@ export function validateLogEntry(entry, lineNumber, options = {}) {
     errors.push(`line ${lineNumber}: tags must be an array`);
   }
 
+  const redactionHits = countRedactionHits(entry);
+  if (redactionHits > 0) {
+    console.warn(JSON.stringify({ event: 'audit.ingest.redaction_detected', redaction_hits: redactionHits }));
+    if (options.mode === 'strict') {
+      errors.push({ code: 'redaction_required', message: `line ${lineNumber}: task fields contain unredacted personal data` });
+    }
+  }
+
   return errors;
 }
 
@@ -140,7 +161,10 @@ export function parseNdjson(content, options = {}) {
     }
     try {
       const entry = JSON.parse(line);
-      const validationErrors = validateLogEntry(entry, lineNumber, options);
+      const validationErrors = validateLogEntry(entry, lineNumber, {
+        ...options,
+        mode: options.config ? resolveIngestMode(options.config, entry?.agent_id) : options.mode,
+      });
       if (validationErrors.length > 0) {
         errors.push(...validationErrors);
         continue;
@@ -175,6 +199,7 @@ export function normalizeEntry(entry) {
     original_request: entry.original_request === '' ? null : (entry.original_request ?? null),
     agent_result: entry.agent_result === '' ? null : (entry.agent_result ?? null),
     expected_purpose: entry.expected_purpose === '' ? null : (entry.expected_purpose ?? null),
+    redaction_hits: countRedactionHits(entry),
     entity_type: entity?.type ?? null,
     entity_id: entity?.id ?? null,
     llm_intent_json: entry.llm_intent ? JSON.stringify(entry.llm_intent) : null,

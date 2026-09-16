@@ -232,12 +232,12 @@ export function createAuditIngestService({ db, config, cursorStore, now = () => 
         let fileInserted = 0;
         let skippedBytes = 0;
         if (completeText.length > 0) {
-          const { entries, errors } = parseNdjson(completeText, { maxLineBytes: limits.maxLineBytes });
+          const { entries, errors } = parseNdjson(completeText, { maxLineBytes: limits.maxLineBytes, config });
           fileParseErrors = errors.map((e) => ({
             agent_id: agentId,
             file: basename(absPath),
-            line: e.match(/^line (\d+)/)?.[1] ?? '?',
-            error: e,
+            line: (typeof e === 'string' ? e : e.message).match(/^line (\d+)/)?.[1] ?? '?',
+            error: typeof e === 'string' ? e : e.message,
           }));
           if (entries.length > 0) {
             const rows = entries.map(normalizeEntry);

@@ -4,6 +4,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
+import { buildDemoTrace } from '../../scripts/send-audit-demo-logs.js';
 import { openDb } from '../../scripts/lib/db.js';
 import { ensureReviewSchema } from '../../src/db/reviewSchema.js';
 import { createIngestCursorStore } from '../../src/auditReview/ingestCursorStore.js';
@@ -225,10 +226,14 @@ test('POST /v1/ingest accepts JSON event batches and stores them immediately', a
 test('POST /v1/ingest prunes audit events immediately after accepted batches', async () => {
   await withIngestServer(async ({ baseUrl, db }) => {
     const oldestEventId = insertAuditEvent(db, makeEvent({
-      ts: '2026-07-05T01:00:00.000Z',
+      ts: '2026-05-01T01:00:00.000Z',
       trace_id: 'prune-oldest',
       span_id: 'span-prune-oldest',
     }));
+    db.prepare(`INSERT INTO audit_traces (
+      agent_id, trace_id, last_event_at, sealed_at, sealed_reason, updated_at
+    ) VALUES ('remote-agent', 'prune-oldest', '2026-05-01T01:00:00.000Z',
+      '2026-05-01T01:00:00.000Z', 'backfill', '2026-05-01T01:00:00.000Z')`).run();
     insertAuditEvent(db, makeEvent({
       ts: '2026-07-05T01:01:00.000Z',
       trace_id: 'prune-middle',
@@ -239,8 +244,8 @@ test('POST /v1/ingest prunes audit events immediately after accepted batches', a
         review_id, window_from, window_to, status, trigger_type, finding_count,
         risk_policy_version, reviewer_version, started_at
       ) VALUES (
-        'prune-review', '2026-07-05T01:00:00.000Z', '2026-07-05T01:00:00.000Z',
-        'completed', 'ingest', 1, 'risk-policy-v1', 'reviewer-v1', '2026-07-05T01:00:00.000Z'
+        'prune-review', '2026-05-01T01:00:00.000Z', '2026-05-01T01:00:00.000Z',
+        'completed', 'ingest', 1, 'risk-policy-v1', 'reviewer-v1', '2026-05-01T01:00:00.000Z'
       )
     `).run();
     db.prepare(`
@@ -251,7 +256,7 @@ test('POST /v1/ingest prunes audit events immediately after accepted batches', a
       ) VALUES (
         'prune-finding', 'prune-review', 'prune-finding-hash', 'failed_call', 'medium',
         'old finding', 'old finding', @evidence_event_ids_json, @evidence_json, 'open',
-        '2026-07-05T01:00:00.000Z', '2026-07-05T01:00:00.000Z',
+        '2026-05-01T01:00:00.000Z', '2026-05-01T01:00:00.000Z',
         'risk-policy-v1', 'reviewer-v1'
       )
     `).run({
@@ -265,7 +270,7 @@ test('POST /v1/ingest prunes audit events immediately after accepted batches', a
       ) VALUES (
         'prune-occurrence', 'prune-finding', 'prune-review', 'medium', 'old finding', 'old finding',
         @evidence_event_ids_json, @evidence_json,
-        '2026-07-05T01:00:00.000Z', '2026-07-05T01:00:00.000Z'
+        '2026-05-01T01:00:00.000Z', '2026-05-01T01:00:00.000Z'
       )
     `).run({
       evidence_event_ids_json: JSON.stringify([oldestEventId]),
@@ -295,8 +300,9 @@ test('POST /v1/ingest prunes audit events immediately after accepted batches', a
     assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM audit_review_runs`).get().count, 0);
   }, {
     retention: {
-      eventsHours: 48,
-      maxEventsPerAgent: 2,
+      traceDays: 30,
+      highRiskTraceDays: 90,
+      maxTracesPerAgent: 2000,
     },
   }, ({ db, config, cursorStore }) => ({
     retentionService: createRetentionService({
@@ -604,7 +610,7 @@ test('POST /v1/ingest rejects overlong events and does not spool them', async ()
       body: JSON.stringify(makeEvent({ result_summary: 'x'.repeat(80) })),
     });
 
-    assert.equal(response.status, 202);
+    assert.equal(response.status, 413);
     const body = await response.json();
     assert.equal(body.accepted, 0);
     assert.equal(body.rejected, 1);
@@ -671,4 +677,87 @@ test('POST /v1/ingest is disabled when ingest.http.enabled is false', async () =
       spoolDir: path.join(os.tmpdir(), `audit-http-ingest-disabled-${Date.now()}`),
     },
   });
+});
+
+
+test('task validation reports every bad row and persists valid batch rows', async () => {
+  await withIngestServer(async ({ baseUrl, db }) => {
+    const response = await fetch(`${baseUrl}/v1/ingest`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ events: [
+        makeEvent({ requester_id: {} }),
+        makeEvent({ trace_id: 'good', requester_id: 'user-anon' }),
+        makeEvent({ requester_id: [] }),
+      ] }),
+    });
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.equal(body.accepted, 1);
+    assert.equal(body.rejected, 2);
+    assert.deepEqual(body.errors.map(e => e.index), [0, 2]);
+    assert.equal(db.prepare('SELECT trace_id FROM audit_events').get().trace_id, 'good');
+  });
+});
+
+test('redaction fallback counts all task fields and strict refuses before persistence', async () => {
+  for (const mode of ['compat', 'strict']) {
+    await withIngestServer(async ({ baseUrl, db, ingestService }) => {
+      const event = makeEvent({ requester_id: 'a@example.test', original_request: '13800138000',
+        expected_purpose: '11010519491231002X', agent_result: 'b@example.test', ingested_at: '1900-01-01' });
+      const response = await fetch(`${baseUrl}/v1/ingest`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(event),
+      });
+      assert.equal(response.status, mode === 'strict' ? 400 : 202);
+      const row = db.prepare('SELECT * FROM audit_events').get();
+      if (mode === 'strict') {
+        assert.equal(row, undefined);
+        assert.equal((await response.json()).error_code, 'redaction_required');
+      } else {
+        assert.equal(row.redaction_hits, 4);
+        assert.match(row.ingested_at, /^\d{4}-.*Z$/);
+        assert.notEqual(row.ingested_at, event.ingested_at);
+        assert.equal(row.original_request, event.original_request);
+        assert.equal(ingestService.ingestSince({ sinceDate: '2026-07-06' }).inserted, 0);
+        assert.equal(db.prepare('SELECT ingested_at FROM audit_events').get().ingested_at, row.ingested_at);
+      }
+    }, { agents: { 'remote-agent': { ingestMode: mode } } });
+  }
+});
+
+
+test('NDJSON reports oversized lines as 413 and continues validating the batch', async () => {
+  await withIngestServer(async ({ baseUrl, db }) => {
+    const response = await fetch(`${baseUrl}/v1/ingest`, {
+      method: 'POST', headers: { 'content-type': 'application/x-ndjson' },
+      body: JSON.stringify(makeEvent({ extra: 'x'.repeat(600) })) + '\n' + JSON.stringify(makeEvent({ trace_id: 'good-line' })) + '\n',
+    });
+    assert.equal(response.status, 413);
+    const body = await response.json();
+    assert.equal(body.error_code, 'payload_too_large');
+    assert.equal(body.accepted, 1);
+    assert.equal(body.rejected, 1);
+    assert.equal(db.prepare('SELECT trace_id FROM audit_events').get().trace_id, 'good-line');
+  }, { ingest: { http: { maxBodyBytes: 4096, maxLineBytes: 512 } } });
+});
+
+
+test('both demo generators pass strict HTTP ingestion with task context', async () => {
+  await withIngestServer(async ({ baseUrl, db }) => {
+    for (const kind of ['normal', 'high-risk']) {
+      const batch = buildDemoTrace(kind);
+      const response = await fetch(`${baseUrl}/v1/ingest`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ events: batch.events }),
+      });
+      assert.equal(response.status, 202);
+      assert.deepEqual(await response.json(), { accepted: 6, rejected: 0, errors: [] });
+      const start = db.prepare("SELECT * FROM audit_events WHERE trace_id = ? AND event = 'run.start'").get(batch.traceId);
+      const final = db.prepare("SELECT * FROM audit_events WHERE trace_id = ? AND event = 'run.final_result'").get(batch.traceId);
+      assert.equal(start.requester_id, 'demo_operator');
+      assert.ok(start.original_request);
+      assert.ok(start.expected_purpose);
+      assert.ok(final.agent_result);
+      assert.equal(start.redaction_hits, 0);
+    }
+  }, { ingest: { defaultMode: 'strict', http: { maxBodyBytes: 1024 * 1024, maxLineBytes: 64 * 1024 } } });
 });
