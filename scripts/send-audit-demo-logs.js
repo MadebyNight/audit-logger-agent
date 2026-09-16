@@ -1,12 +1,11 @@
 import { randomInt, randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
-const DEFAULT_BASE_URL = 'http://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me';
+const DEFAULT_BASE_URL = 'https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me';
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_REVIEW_TIMEOUT_MS = 120_000;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const EVENT_SKEW_MS = 5_000;
-const EXPECTED_EVENT_COUNT = 6;
 
 const NORMAL_SCENARIOS = Object.freeze([
   {
@@ -150,15 +149,6 @@ async function requestJson(url, options, runtime) {
   return body;
 }
 
-async function requestText(url, options, runtime) {
-  const response = await fetchWithTimeout(url, options, runtime);
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`页面请求失败：${url}，HTTP ${response.status}`);
-  }
-  return text;
-}
-
 function eventTimestamp(baseTimeMs, offsetMs) {
   return new Date(baseTimeMs + offsetMs).toISOString();
 }
@@ -168,11 +158,12 @@ export function buildDemoTrace(kind, {
   idFactory = randomUUID,
   randomIntImpl = randomInt,
 } = {}) {
-  if (kind !== 'normal' && kind !== 'high-risk') {
+  if (!['normal', 'medium-risk', 'high-risk'].includes(kind)) {
     throw new Error(`不支持的演示类型：${kind}`);
   }
 
   const highRisk = kind === 'high-risk';
+  const mediumRisk = kind === 'medium-risk';
   const traceId = idFactory();
   const runSpanId = idFactory();
   const agentSpanId = idFactory();
@@ -206,6 +197,9 @@ export function buildDemoTrace(kind, {
       ts: eventTimestamp(baseTimeMs, 0),
       span_id: runSpanId,
       event: 'run.start',
+      requester_id: 'demo_operator',
+      original_request: `请演示${scenario.action}，仅发送审计事件，不修改真实业务数据`,
+      expected_purpose: `生成${scenario.name}的完整审计链路以验证日志接入`,
       tool_name: 'agent.run',
       status: 'OK',
       result_summary: highRisk
@@ -278,6 +272,7 @@ export function buildDemoTrace(kind, {
       ts: eventTimestamp(baseTimeMs, 65),
       span_id: runSpanId,
       event: 'run.final_result',
+      agent_result: `${scenario.name}演示事件已生成，未修改真实业务数据`,
       tool_name: 'agent.run',
       status: 'OK',
       result_summary: highRisk
@@ -287,6 +282,30 @@ export function buildDemoTrace(kind, {
       tags: highRisk ? ['demo', 'high-risk', runToken] : ['demo', 'normal', runToken],
     },
   ];
+
+  if (highRisk) {
+    events[3].event = 'tool.error';
+    events[3].status = 'UNAVAILABLE';
+    events[3].result_summary = `${scenario.action}失败：服务不可用，重试未恢复`;
+    events[3].error = { message: '服务不可用，任务无法完成' };
+    events[4].event = 'agent.error';
+    events[4].status = 'UNAVAILABLE';
+    events[4].result_summary = '工具失败未恢复，任务失败，需要人工介入';
+    events[5].event = 'run.failed';
+    events[5].status = 'UNAVAILABLE';
+    events[5].agent_result = `${scenario.action}失败，未完成用户请求，需要人工介入；仅模拟事件，无真实业务写入`;
+    events[5].result_summary = '任务失败，需要人工介入';
+  } else if (mediumRisk) {
+    const retrySpanId = idFactory();
+    const toolEnd = { ...events[3], span_id: retrySpanId };
+    events[3] = { ...events[3], event: 'tool.error', status: 'UNAVAILABLE',
+      result_summary: '首次查询失败，准备重试', error: { message: '临时服务不可用' } };
+    events.splice(4, 0,
+      { ...events[2], span_id: retrySpanId, ts: eventTimestamp(baseTimeMs, 46),
+        result_summary: '重试查询', attempt: { number: 2, retry_of_span_id: toolSpanId } },
+      { ...toolEnd, ts: eventTimestamp(baseTimeMs, 50), result_summary: '重试成功，已取得完整结果' });
+    events.at(-1).agent_result = '首次工具调用失败，重试成功，已完成用户请求';
+  }
 
   return {
     kind,
@@ -310,7 +329,7 @@ async function sendBatch(batch, config, runtime) {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ events: batch.events }),
   }, runtime);
-  if (result.accepted !== EXPECTED_EVENT_COUNT || result.rejected !== 0) {
+  if (result.accepted !== batch.events.length || result.rejected !== 0) {
     throw new Error(
       `${batch.kind} 批次接收异常：accepted=${result.accepted}，rejected=${result.rejected}`,
     );
@@ -318,139 +337,41 @@ async function sendBatch(batch, config, runtime) {
   return result;
 }
 
-async function queryTrace(traceId, config, runtime) {
-  const url = `${config.baseUrl}/query?trace_id=${encodeURIComponent(traceId)}&limit=100`;
-  return requestJson(url, { method: 'GET' }, runtime);
-}
-
-function traceMappingReady(result, batch) {
-  if (result.count !== EXPECTED_EVENT_COUNT || !Array.isArray(result.results)) return false;
-  const traceIds = new Set(result.results.map((event) => event.trace_id));
-  if (traceIds.size !== 1 || !traceIds.has(batch.traceId)) return false;
-  const toolEvents = result.results.filter((event) => event.event?.startsWith('tool.'));
-  return toolEvents.length === 2 && toolEvents.every((event) => (
-    event.tool_name === batch.toolName
-    && event.mapping_status === 'mapped'
-    && event.mapped_tool_type === batch.expectedMappedType
-  ));
-}
-
-async function waitForTraceMapping(batch, config, runtime) {
-  const attempts = Math.max(1, Math.ceil(config.reviewTimeoutMs / config.pollIntervalMs));
-  let lastResult = null;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    lastResult = await queryTrace(batch.traceId, config, runtime);
-    if (traceMappingReady(lastResult, batch)) return lastResult;
-    await runtime.sleepImpl(config.pollIntervalMs);
+export function validateBatchReview(batch, trace) {
+  if (trace.agent_id !== batch.agentId || trace.trace_id !== batch.traceId) {
+    throw new Error('Trace 复合标识不匹配');
   }
-  throw new Error(
-    `${batch.kind} Trace 映射等待超时：trace=${batch.traceId}，count=${lastResult?.count ?? 'unknown'}`,
-  );
+  const result = trace.audit_result;
+  const expectedRisk = batch.kind === 'high-risk' ? 'high' : batch.kind === 'medium-risk' ? 'medium' : 'none';
+  const expectedStatus = batch.kind === 'high-risk' ? 'failed' : 'success';
+  if (!result || result.review_version < 1 || result.trace_status !== expectedStatus
+    || result.risk_level !== expectedRisk) {
+    throw new Error(`${batch.kind} Trace 结论不符合预期：${result?.trace_status}/${result?.risk_level}`);
+  }
+  if (trace.events?.length !== batch.events.length) throw new Error('Trace 事件不完整');
 }
 
-function decodeHtml(text) {
-  return text
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
-}
-
-export function parseReviewPage(html) {
-  const text = decodeHtml(String(html))
-    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  const numberOf = (pattern) => {
-    const match = text.match(pattern);
-    return match ? Number(match[1]) : null;
-  };
-  const windowMatch = text.match(
-    /(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s*~\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/,
-  );
-  return {
-    text,
-    findingCount: numberOf(/已完成\s+(\d+)\s+个发现/),
-    criticalCount: numberOf(/(\d+)\s+严重/),
-    highCount: numberOf(/(\d+)\s+高风险/),
-    candidateCount: numberOf(/候选事件数\s+(\d+)/),
-    windowFrom: windowMatch?.[1] ?? null,
-    windowTo: windowMatch?.[2] ?? null,
-  };
-}
-
-function reviewCoversBatch(review, batch) {
-  const from = Date.parse(review.windowFrom);
-  const to = Date.parse(review.windowTo);
-  const first = Date.parse(batch.events[0].ts);
-  const last = Date.parse(batch.events[batch.events.length - 1].ts);
-  return [from, to, first, last].every(Number.isFinite) && from <= first && to >= last;
-}
-
-async function waitForReview(batch, previousReviewId, config, runtime) {
+async function waitForReview(batch, config, runtime) {
   const attempts = Math.max(1, Math.ceil(config.reviewTimeoutMs / config.pollIntervalMs));
-  const inspected = new Set();
+  const query = new URLSearchParams({ agent_id: batch.agentId, trace_id: batch.traceId });
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const health = await getHealth(config, runtime);
-    const current = health.latest_review;
-    const terminal = current?.status === 'completed' || current?.status === 'completed_degraded';
-    if (current?.review_id && current.review_id !== previousReviewId && terminal && !inspected.has(current.review_id)) {
-      inspected.add(current.review_id);
-      const dashboardUrl = `${config.baseUrl}/dashboard/audit-reviews/${encodeURIComponent(current.review_id)}`;
-      const html = await requestText(dashboardUrl, { method: 'GET' }, runtime);
-      const review = parseReviewPage(html);
-      if (reviewCoversBatch(review, batch)) {
-        return { reviewId: current.review_id, dashboardUrl, health, review };
-      }
-    }
-    if (current?.review_id && current.review_id !== previousReviewId && current.status === 'failed') {
-      throw new Error(`${batch.kind} 审查失败：${current.review_id}`);
+    const response = await requestJson(`${config.baseUrl}/v1/audit-logs?${query}`, {
+      method: 'GET', headers: { authorization: `Bearer ${config.token}` },
+    }, runtime);
+    const trace = response.traces?.find(row => row.agent_id === batch.agentId && row.trace_id === batch.traceId);
+    if (trace?.audit_result?.review_version > 0) {
+      validateBatchReview(batch, trace);
+      return trace;
     }
     await runtime.sleepImpl(config.pollIntervalMs);
   }
-  throw new Error(`${batch.kind} 等待覆盖目标 Trace 的审查超时：${batch.traceId}`);
-}
-
-export function validateBatchReview(batch, review) {
-  const identifiesTarget = review.text.includes(batch.agentId) && review.text.includes(batch.toolName);
-  if (batch.kind === 'normal') {
-    if (identifiesTarget) {
-      throw new Error(`正常工具被生成风险 Finding：${batch.toolName}`);
-    }
-    return;
-  }
-  if (!identifiesTarget) {
-    throw new Error(`高风险 Review 未包含目标 Agent/工具：${batch.agentId}/${batch.toolName}`);
-  }
-  if ((review.highCount ?? 0) < 1 || (review.findingCount ?? 0) < 1 || (review.candidateCount ?? 0) < 1) {
-    throw new Error(
-      `高风险 Review 未达到预期：findings=${review.findingCount}，high=${review.highCount}，candidates=${review.candidateCount}`,
-    );
-  }
-}
-
-async function waitForOutbox(config, runtime) {
-  const attempts = Math.max(1, Math.ceil(config.reviewTimeoutMs / config.pollIntervalMs));
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const health = await getHealth(config, runtime);
-    const mode = health.notification_digest?.feishu_mode;
-    const pending = Number(health.outbox?.pending ?? 0);
-    const deadLetter = Number(health.outbox?.dead_letter ?? 0);
-    if (mode !== 'live') throw new Error(`飞书模式不是 live：${mode ?? 'unknown'}`);
-    if (deadLetter > 0) throw new Error(`Outbox 出现死信：${deadLetter}`);
-    if (pending === 0) return health;
-    await runtime.sleepImpl(config.pollIntervalMs);
-  }
-  throw new Error('等待飞书 Outbox 清空超时');
+  throw new Error(`${batch.kind} 等待 Trace 审查超时：${batch.traceId}`);
 }
 
 function readConfig(env) {
   return {
     baseUrl: normalizeBaseUrl(env.AUDIT_DEMO_BASE_URL),
+    token: env.AUDIT_AGENT_DASHBOARD_TOKEN,
     timeoutMs: positiveInteger(env.AUDIT_DEMO_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
     reviewTimeoutMs: positiveInteger(env.AUDIT_DEMO_REVIEW_TIMEOUT_MS, DEFAULT_REVIEW_TIMEOUT_MS),
     pollIntervalMs: positiveInteger(env.AUDIT_DEMO_POLL_INTERVAL_MS, DEFAULT_POLL_INTERVAL_MS),
@@ -470,66 +391,37 @@ export async function runAuditDemo({
   const config = readConfig(env);
   const runtime = { fetchImpl, sleepImpl, timeoutMs: config.timeoutMs };
 
+  if (!config.token) throw new Error('需要 AUDIT_AGENT_DASHBOARD_TOKEN 读取 Trace 审查结果');
   log(`审计服务：${config.baseUrl}`);
-  log('本次演示会写入两条新 Trace，并触发一次真实飞书高风险告警。');
-
-  const initialHealth = await getHealth(config, runtime);
-  if (initialHealth.status !== 'ok' || initialHealth.db?.writable !== true) {
+  log('发送正常、工具失败后恢复、任务失败三条模拟 Trace；通知由服务端配置决定。');
+  const health = await getHealth(config, runtime);
+  if (health.status !== 'ok' || health.db?.writable !== true) {
     throw new Error('审计服务健康检查未通过或数据库不可写');
   }
-  if (initialHealth.notification_digest?.feishu_mode !== 'live') {
-    throw new Error(`飞书模式不是 live：${initialHealth.notification_digest?.feishu_mode ?? 'unknown'}`);
+  const result = { baseUrl: config.baseUrl };
+  for (const [key, kind] of [['normal', 'normal'], ['mediumRisk', 'medium-risk'], ['highRisk', 'high-risk']]) {
+    const batch = buildDemoTrace(kind, { nowMs: nowImpl(), idFactory, randomIntImpl });
+    await sendBatch(batch, config, runtime);
+    const trace = await waitForReview(batch, config, runtime);
+    result[key] = {
+      traceId: batch.traceId, agentId: batch.agentId, scenarioName: batch.scenarioName,
+      toolName: batch.toolName, entity: batch.entity, auditResult: trace.audit_result,
+      dashboardUrl: `${config.baseUrl}/dashboard/agents/${encodeURIComponent(batch.agentId)}/traces/${encodeURIComponent(batch.traceId)}`,
+    };
+    log(`${kind} 验证通过：${trace.audit_result.trace_status}/${trace.audit_result.risk_level}`);
   }
-
-  const normal = buildDemoTrace('normal', { nowMs: nowImpl(), idFactory, randomIntImpl });
-  log(`发送正常批次：${normal.traceId}｜${normal.scenarioName}｜${normal.toolName}`);
-  await sendBatch(normal, config, runtime);
-  await waitForTraceMapping(normal, config, runtime);
-  const normalReview = await waitForReview(normal, initialHealth.latest_review?.review_id, config, runtime);
-  validateBatchReview(normal, normalReview.review);
-  log(`正常批次验证通过：${normalReview.reviewId}`);
-
-  const highRisk = buildDemoTrace('high-risk', { nowMs: nowImpl(), idFactory, randomIntImpl });
-  log(`发送高风险批次：${highRisk.traceId}｜${highRisk.scenarioName}｜${highRisk.toolName}`);
-  await sendBatch(highRisk, config, runtime);
-  await waitForTraceMapping(highRisk, config, runtime);
-  const highRiskReview = await waitForReview(highRisk, normalReview.reviewId, config, runtime);
-  validateBatchReview(highRisk, highRiskReview.review);
-  const finalHealth = await waitForOutbox(config, runtime);
-  log(`高风险批次验证通过：${highRiskReview.reviewId}`);
-
-  return {
-    baseUrl: config.baseUrl,
-    normal: {
-      traceId: normal.traceId,
-      reviewId: normalReview.reviewId,
-      dashboardUrl: normalReview.dashboardUrl,
-      agentId: normal.agentId,
-      toolName: normal.toolName,
-      scenarioName: normal.scenarioName,
-      entity: normal.entity,
-    },
-    highRisk: {
-      traceId: highRisk.traceId,
-      reviewId: highRiskReview.reviewId,
-      dashboardUrl: highRiskReview.dashboardUrl,
-      agentId: highRisk.agentId,
-      toolName: highRisk.toolName,
-      scenarioName: highRisk.scenarioName,
-      entity: highRisk.entity,
-    },
-    feishuMode: finalHealth.notification_digest?.feishu_mode,
-    outbox: finalHealth.outbox,
-  };
+  return result;
 }
 
 function printHelp() {
   console.log(`用法：npm run demo:audit-logs
 
-发送一批正常审计日志和一批高风险审计日志，等待审查完成并验证飞书告警链路。
+发送正常、失败后恢复、任务失败三类日志，通过 Trace API 验证 none/medium/high 结论。
+通知行为由服务端 live/sink/dry-run 配置决定，本脚本不将全局 Outbox 清空视为投递成功。
 
 环境变量：
-  AUDIT_DEMO_BASE_URL          审计服务基地址
+  AUDIT_DEMO_BASE_URL          审计服务基地址（本地验证请指定本地 sink/dry-run 服务）
+  AUDIT_AGENT_DASHBOARD_TOKEN  Trace 读取 API 的 Bearer token
   AUDIT_DEMO_TIMEOUT_MS        单次 HTTP 请求超时，默认 ${DEFAULT_TIMEOUT_MS}
   AUDIT_DEMO_REVIEW_TIMEOUT_MS Review 等待超时，默认 ${DEFAULT_REVIEW_TIMEOUT_MS}
   AUDIT_DEMO_POLL_INTERVAL_MS  轮询间隔，默认 ${DEFAULT_POLL_INTERVAL_MS}
@@ -542,18 +434,9 @@ async function main() {
     return;
   }
   const result = await runAuditDemo();
-  console.log('');
-  console.log('演示完成');
-  console.log(`正常场景：${result.normal.scenarioName}｜${result.normal.toolName}｜${result.normal.agentId}`);
-  console.log(`正常 Trace：${result.normal.traceId}`);
-  console.log(`正常 Review：${result.normal.reviewId}`);
-  console.log(`正常 Dashboard：${result.normal.dashboardUrl}`);
-  console.log(`高风险场景：${result.highRisk.scenarioName}｜${result.highRisk.toolName}｜${result.highRisk.agentId}`);
-  console.log(`高风险 Trace：${result.highRisk.traceId}`);
-  console.log(`高风险 Review：${result.highRisk.reviewId}`);
-  console.log(`高风险 Dashboard：${result.highRisk.dashboardUrl}`);
-  console.log(`飞书模式：${result.feishuMode}`);
-  console.log(`Outbox：pending=${result.outbox?.pending ?? 0}，dead_letter=${result.outbox?.dead_letter ?? 0}`);
+  for (const key of ['normal', 'mediumRisk', 'highRisk']) {
+    console.log(`${key}：${result[key].auditResult.risk_level}｜${result[key].dashboardUrl}`);
+  }
 }
 
 const directEntry = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;

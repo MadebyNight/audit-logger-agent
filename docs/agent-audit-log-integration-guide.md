@@ -21,11 +21,13 @@
 默认审计服务地址：
 
 ```text
-服务基地址：http://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me
-日志接收地址：http://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/v1/ingest
-Agent 日志入口：http://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/
-审计 Dashboard：http://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/dashboard
+服务基地址：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me
+日志接收地址：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/v1/ingest
+Agent 日志入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/
+审计 Dashboard：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/dashboard
 ```
+
+生产公网入口必须使用 HTTPS；本地开发可使用 `http://127.0.0.1:9320`。上述域名需部署方完成证书与路由配置后使用。
 
 如用户提供了其他环境的地址，以用户提供的 `AUDIT_INGEST_URL` 和 Dashboard 基地址为准。
 
@@ -261,7 +263,7 @@ catalog.update.verify
 先检查服务：
 
 ```powershell
-$auditBaseUrl = 'http://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me'
+$auditBaseUrl = 'https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me'
 $agentId = '<目标 Agent 的实际 agent_id>'
 $env:AUDIT_INGEST_URL = "$auditBaseUrl/v1/ingest"
 
@@ -300,8 +302,8 @@ $result.results | Format-Table ts, agent_id, event, tool_name, status, trace_id,
 最后打开 Dashboard：
 
 ```text
-Agent 日志入口：http://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/
-目标 Agent 审计视图：http://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/dashboard?agent_id=<URL 编码后的 agent_id>
+Agent 日志入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/
+目标 Agent 审计视图：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/dashboard?agent_id=<URL 编码后的 agent_id>
 ```
 
 在 Agent 日志入口确认：
@@ -395,12 +397,12 @@ Agent 日志入口：http://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-1
 
 | 字段 | 类型与要求 | 事件归属 |
 | --- | --- | --- |
-| `requester_id` | 稳定且已脱敏的用户标识 | `run.start` 必填；同一 Trace 后续事件可继承或重复携带 |
-| `original_request` | 用户原始请求摘要或正文；必须脱敏并遵守长度限制 | `run.start` 必填 |
-| `expected_purpose` | Agent 预期完成的任务目的摘要；可选增强字段 | 可选；缺省不影响接收，也不使 Trace 变为上下文不完整 |
-| `agent_result` | Agent 最终执行结果或失败摘要 | `run.final_result`、`run.failed` 必填；失败事件填写失败原因 |
+| `requester_id` | string，1—128 字符；稳定且不可逆脱敏的用户标识 | `run.start` 必填；同一 Trace 后续事件可继承或重复携带 |
+| `original_request` | string，1—2000 字符；脱敏后的用户原始请求摘要或正文 | `run.start` 必填 |
+| `expected_purpose` | string，最多 1000 字符；允许缺失或为空，不以 original_request 顶替 | 可选；缺省不影响接收，也不使 Trace 变为上下文不完整 |
+| `agent_result` | string，1—2000 字符；Agent 最终执行结果或失败摘要 | `run.final_result`、`run.failed` 必填；失败事件填写失败原因 |
 
-V1.1 的必填任务级字段是 `requester_id`、`original_request`、`agent_result` 三个；`expected_purpose` 属于可选增强，用于对比用户诉求与 Agent 自述目的，缺省不阻断接入。这些字段不要求每条 `tool.*` 事件重复携带完整请求文本。服务端会按 `trace_id` 归并并在批量读取 API、Dashboard 和审计证据中提供。历史事件缺少这些字段时保留为空，不回填猜测值。
+V1.1 的必填任务级字段是 `requester_id`、`original_request`、`agent_result` 三个；`expected_purpose` 属于可选增强，用于对比用户诉求与 Agent 自述目的，缺省不阻断接入。这些字段不要求每条 `tool.*` 事件重复携带完整请求文本。服务端会按 `(agent_id, trace_id)` 归并并在批量读取 API、Dashboard 和审计证据中提供。历史事件缺少这些字段时保留为空，不回填猜测值。
 
 服务端按 Agent 决定上述必填校验的强度（接收模式），解析优先级从高到低：
 
@@ -413,7 +415,42 @@ V1.1 的必填任务级字段是 `requester_id`、`original_request`、`agent_re
 | `compat`（默认） | 类型或长度非法仍会拒绝该条事件；任务字段缺失不拒绝，事件照常入库，对应 Trace 标记为"任务上下文不完整" |
 | `strict` | `run.start` 缺 `requester_id`/`original_request`，或 `run.final_result`/`run.failed` 缺 `agent_result` 时，该条事件返回 400 `missing_required_task_field` 被拒绝；缺 `expected_purpose` 不在拒绝范围内 |
 
-接入方无需主动申请模式切换：新接入在验收阶段会由服务端切到 `strict` 验证，验收通过后该 Agent 固定在 `strict` 模式运行。两种模式下，类型、长度和请求体积非法都会同步拒绝，差异只在必填字段缺失时的行为。
+接入方无需主动申请模式切换：新接入在验收阶段会由服务端切到 `strict` 验证，验收通过后该 Agent 固定在 `strict` 模式运行。两种模式下，类型、长度和请求体积非法都会同步拒绝，必填缺失和脱敏命中的处理随模式变化。服务端扫描四个任务字段中的手机号、邮箱和身份证号模式；compat 保留证据并记录 redaction_hits，strict 返回 400 redaction_required。该计数由 /health 按 Agent 汇总，不进入任务详情和读取 API。
+
+成功任务最小生命周期示例（同一任务共享 Trace 和根 Span）：
+
+```json
+{
+  "events": [
+    {
+      "ts": "2026-09-16T08:30:00.000Z", "agent_id": "catalog-agent",
+      "trace_id": "request-8ecb", "span_id": "run-1", "event": "run.start",
+      "tool_name": "agent.run", "status": "OK", "result_summary": "开始查询商品状态",
+      "requester_id": "user_7f3a", "original_request": "查询商品 761 的当前状态",
+      "expected_purpose": "读取商品状态并整理查询结果，不修改数据"
+    },
+    {
+      "ts": "2026-09-16T08:30:01.000Z", "agent_id": "catalog-agent",
+      "trace_id": "request-8ecb", "span_id": "run-1", "event": "run.final_result",
+      "tool_name": "agent.run", "status": "OK", "result_summary": "已返回商品状态",
+      "agent_result": "商品 761 当前可售；已返回查询结果，未修改业务数据"
+    }
+  ]
+}
+```
+
+失败时发送 `run.failed`，并明确失败原因：
+
+```json
+{
+  "ts": "2026-09-16T08:30:01.000Z", "agent_id": "catalog-agent",
+  "trace_id": "request-failed", "span_id": "run-2", "event": "run.failed",
+  "tool_name": "agent.run", "status": "UNAVAILABLE", "result_summary": "查询失败",
+  "agent_result": "商品服务不可用，未能完成查询，未修改业务数据"
+}
+```
+
+`result_summary` 仍限 200 字符，不与 `agent_result` 共用长度限制。以上示例只说明任务字段，真实任务仍须发送 Agent 和工具事件。
 
 字段迁移规则：
 
@@ -569,10 +606,11 @@ network database file notification llm
 
 `202` 只表示请求已处理，不表示批次全部成功：
 
-1. 网络错误、超时或非 2xx：本次事件未确认，进入重试队列。
-2. 单事件收到 2xx：只有 `accepted === 1` 且 `rejected === 0` 才算确认。
-3. 批量请求收到 `202` 且 `rejected > 0`：根据 `errors[].index` 保留对应的拒收事件，只移除已确认事件。
-4. `400` 表示请求 JSON 结构错误，`413` 表示请求过大，`415` 表示 `Content-Type` 错误。这类问题需要修复 payload 或配置，不能无限快速重试。
+1. 网络错误或超时导致没有可解析响应时，本次事件未确认，进入重试队列。
+2. 单事件只有 `accepted === 1` 且 `rejected === 0` 才算确认。
+3. 批次可能部分接收；即使返回 400 或 413，只要响应含 `accepted`、`rejected` 和 `errors[].index`，也要保留拒收行、移除已确认行，不重发整批。
+4. `400` 包括 JSON 格式、字段类型、长度、strict 必填缺失或脱敏命中；`413 payload_too_large` 包括请求超过 1 MiB 或单行超过 64 KiB；`415` 表示 Content-Type 错误。修复后再发送，不能无限快速重试。
+5. 请求体整体超限会在解析前拒绝整批；单行超限会继续检查其他行，返回完整拒收索引。
 
 ### 6.3 回放与去重
 

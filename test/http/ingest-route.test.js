@@ -741,22 +741,24 @@ test('NDJSON reports oversized lines as 413 and continues validating the batch',
 });
 
 
-test('both demo generators pass strict HTTP ingestion with task context', async () => {
+test('all demo generators pass strict HTTP ingestion with task context', async () => {
   await withIngestServer(async ({ baseUrl, db }) => {
-    for (const kind of ['normal', 'high-risk']) {
+    for (const kind of ['normal', 'medium-risk', 'high-risk']) {
       const batch = buildDemoTrace(kind);
       const response = await fetch(`${baseUrl}/v1/ingest`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ events: batch.events }),
       });
       assert.equal(response.status, 202);
-      assert.deepEqual(await response.json(), { accepted: 6, rejected: 0, errors: [] });
+      assert.deepEqual(await response.json(), { accepted: batch.events.length, rejected: 0, errors: [] });
       const start = db.prepare("SELECT * FROM audit_events WHERE trace_id = ? AND event = 'run.start'").get(batch.traceId);
-      const final = db.prepare("SELECT * FROM audit_events WHERE trace_id = ? AND event = 'run.final_result'").get(batch.traceId);
+      const terminalEvent = kind === 'high-risk' ? 'run.failed' : 'run.final_result';
+      const final = db.prepare('SELECT * FROM audit_events WHERE trace_id = ? AND event = ?').get(batch.traceId, terminalEvent);
       assert.equal(start.requester_id, 'demo_operator');
       assert.ok(start.original_request);
       assert.ok(start.expected_purpose);
       assert.ok(final.agent_result);
+      assert.equal(final.status, kind === 'high-risk' ? 'UNAVAILABLE' : 'OK');
       assert.equal(start.redaction_hits, 0);
     }
   }, { ingest: { defaultMode: 'strict', http: { maxBodyBytes: 1024 * 1024, maxLineBytes: 64 * 1024 } } });
