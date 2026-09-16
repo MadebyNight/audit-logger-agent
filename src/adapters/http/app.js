@@ -11,6 +11,7 @@ import {
 } from '../../../scripts/lib/db.js';
 import { renderDashboard } from '../../auditReview/dashboardTemplate.js';
 import { handleIngestRoute, isHttpIngestEnabled } from './ingestRoute.js';
+import { readTracePage, traceHealth } from '../../auditReview/traceReadService.js';
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 const DEFAULT_MAX_QUERY_LIMIT = 1000;
@@ -74,6 +75,16 @@ function latestReview(db) {
     `).get() ?? null;
   } catch (error) {
     if (isMissingTableError(error)) return null;
+    return { error: error.message };
+  }
+}
+
+function traceHealthStatus(db, config, at, retentionService) {
+  try {
+    const metrics = traceHealth(db, { now: at, maxInvalidOutputRetries: config.auditReview?.traceReview?.maxInvalidOutputRetries ?? 2 });
+    return metrics ? { ...metrics, review_failed_pending_cleanup:
+      retentionService?.countFailedTracesPendingCleanup?.() ?? null } : null;
+  } catch (error) {
     return { error: error.message };
   }
 }
@@ -636,6 +647,9 @@ function listHistory(store, methodName, idName, id, pagination) {
 }
 
 export function createHttpApp({ db, config, runStore, runtime, scheduler, reviewStore, visualization, dashboardAuth, findingLifecycleService, toolSemanticMapper, retentionService, notificationDigestScheduler, flushNotifications, now = () => new Date() } = {}) {
+  let activeTraceExports = 0;
+  const exportConcurrency = positiveInteger(config?.auditReview?.http?.maxConcurrentTraceExports, 2);
+  const exportMaxBytes = positiveInteger(config?.auditReview?.http?.maxTraceResponseBytes, 4 * 1024 * 1024);
   // Helpers for audit-review routes. These are optional — if not provided
   // (e.g. in the existing runs-api test), the new routes return 503.
   const hasReviewDeps = !!(scheduler && reviewStore && visualization && dashboardAuth);
@@ -648,11 +662,43 @@ export function createHttpApp({ db, config, runStore, runtime, scheduler, review
     const url = parseUrl(req);
 
     if (req.method === 'OPTIONS') {
+      if (url.pathname === '/v1/audit-logs') {
+        auditJson(res, 204, {}, reviewCors(req));
+        return;
+      }
       json(res, 204, {});
       return;
     }
 
     try {
+      if (req.method === 'GET' && url.pathname === '/v1/audit-logs') {
+        const cors = reviewCors(req);
+        if (!dashboardAuth?.token()) {
+          auditJson(res, 503, { error_code: 'auth_not_configured', error: 'Audit export authentication is not configured' }, cors);
+          return;
+        }
+        if (!dashboardAuth.authorizeApi(req).ok) {
+          auditJson(res, 401, { error_code: 'unauthorized', error: 'Unauthorized' }, cors);
+          return;
+        }
+        if (activeTraceExports >= exportConcurrency) {
+          auditJson(res, 429, { error_code: 'rate_limited', error: 'Too many concurrent trace exports' }, cors);
+          return;
+        }
+        activeTraceExports += 1;
+        let released = false;
+        const release = () => { if (!released) { released = true; activeTraceExports -= 1; } };
+        res.once('finish', release);
+        res.once('close', release);
+        try {
+          // Yield so simultaneous requests observe the independent export concurrency budget.
+          await new Promise((resolve) => setImmediate(resolve));
+          auditJson(res, 200, readTracePage(db, url.searchParams, { maxResponseBytes: exportMaxBytes }), cors);
+        } catch (error) {
+          auditJson(res, error.status ?? 500, { error_code: error.code ?? 'internal_error', error: error.message }, cors);
+        }
+        return;
+      }
       // ===================== Dashboard Browser Login =====================
       if (hasReviewDeps && req.method === 'GET' && url.pathname === '/dashboard/login') {
         redirect(res, '/dashboard');
@@ -809,6 +855,40 @@ export function createHttpApp({ db, config, runStore, runtime, scheduler, review
       }
 
       // ===================== Dashboard Pages (v1.4) =====================
+      const taskDashboardMatch = url.pathname.match(/^\/dashboard\/agents\/([^/]+)(?:\/(traces|requesters)\/([^/]+))?\/?$/);
+      if (hasReviewDeps && req.method === 'GET' && taskDashboardMatch) {
+        const cors = reviewCors(req);
+        const fail = mapAuthFailure(dashboardAuth.authorizeDashboard(req));
+        if (fail) { html(res, fail.status, `<h1>${fail.body.error}</h1>`, cors); return; }
+        let agentId;
+        let childId;
+        try {
+          agentId = decodeURIComponent(taskDashboardMatch[1]);
+          childId = taskDashboardMatch[3] === undefined ? undefined : decodeURIComponent(taskDashboardMatch[3]);
+        } catch {
+          html(res, 400, '<h1>Invalid path encoding</h1>', cors);
+          return;
+        }
+        const kind = taskDashboardMatch[2];
+        const method = kind === 'traces' ? 'traceDetailPage' : kind === 'requesters' ? 'requesterTasksPage' : 'agentPage';
+        if (typeof visualization[method] !== 'function') {
+          html(res, 503, '<h1>Task dashboard unavailable</h1>', cors);
+          return;
+        }
+        const page = kind === 'traces' ? visualization.traceDetailPage(agentId, childId)
+          : kind === 'requesters' ? visualization.requesterTasksPage(agentId, childId, {
+            page: optionalSearchParam(url, 'page'),
+          }) : visualization.agentPage(agentId, {
+            search: url.searchParams.get('q') ?? '',
+            groups: optionalSearchParam(url, 'groups'),
+            expand: url.searchParams.get('expand') ?? undefined,
+            requesterId: url.searchParams.has('requester_id') ? url.searchParams.get('requester_id') : undefined,
+            page: optionalSearchParam(url, 'page'),
+          });
+        if (!page) { html(res, 404, '<h1>Task not found</h1>', cors); return; }
+        html(res, 200, renderDashboard(page), cors);
+        return;
+      }
       if (hasReviewDeps && req.method === 'GET' && (url.pathname === '/' || url.pathname === '')) {
         const cors = reviewCors(req);
         const auth = dashboardAuth.authorizeDashboard(req);
@@ -948,6 +1028,7 @@ export function createHttpApp({ db, config, runStore, runtime, scheduler, review
           dbPath: config.dbPath,
           db: dbProbe,
           latest_review: latestReview(db),
+          traces: traceHealthStatus(db, config, now(), retentionService),
           outbox: outboxCounts(db),
           notification_digest: notificationDigestHealth(notificationDigestScheduler, db),
           disk: diskUsageEstimate(config.dbPath),

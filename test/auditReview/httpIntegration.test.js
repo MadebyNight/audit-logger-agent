@@ -742,7 +742,7 @@ test('audit review HTTP integration smoke test', async () => {
       const rootHtml = await root.text();
       assert.ok(rootHtml.includes('Agent 日志入口'), 'root page should contain the agent index title');
       assert.ok(rootHtml.includes('agent-test'), 'root page should list received agent id');
-      assert.ok(rootHtml.includes('/dashboard?agent_id=agent-test'), 'root page should link agent to filtered dashboard');
+      assert.ok(rootHtml.includes('/dashboard/agents/agent-test'), 'root page should link to requester-grouped agent dashboard');
       assert.doesNotMatch(rootHtml, MOJIBAKE_PATTERN);
 
       const dashboard = await fetch(`${baseUrl}/dashboard`);
@@ -953,7 +953,7 @@ test('audit review HTTP integration smoke test', async () => {
       for (const [filterName, filterValue] of [
         ['agent_id', 'other-agent'],
         ['severity', 'critical'],
-        ['category', 'failed_call'],
+        ['category', findingRecord.category === 'failed_call' ? 'high_risk_permission' : 'failed_call'],
         ['status', 'resolved'],
       ]) {
         const params = new URLSearchParams({
@@ -1150,7 +1150,7 @@ test('audit review HTTP integration smoke test', async () => {
     // Sanity: the fake outbox should have captured at least 1 enqueue
     // (the summary notification for the successful run).
     // ------------------------------------------------------------------
-    assert.ok(enqueued.length >= 1, 'notifier should have enqueued at least 1 notification');
+    assert.equal(enqueued.length, 0, 'unsealed traces and legacy Findings must not trigger Trace notifications');
     // v1.5 regression: captured payloads must be generic delivery payloads
     // and must NOT carry Feishu/Bot-specific required fields. The generic
     // delivery target is the callback receiver; no bot-specific field is
@@ -1184,7 +1184,7 @@ test('audit review ingests all events and reviews canonical or unknown tool life
   ensureReviewSchema(db);
 
   const capturedPayloads = [];
-  const schedulerNow = new Date('2026-07-08T10:00:00.000Z');
+  let schedulerNow = new Date('2026-07-08T10:00:00.000Z');
   const aliasEventTs = '2026-07-08T09:59:00.000Z';
   const unknownEventTs = '2026-07-08T09:59:30.000Z';
   const config = {
@@ -1199,6 +1199,7 @@ test('audit review ingests all events and reviews canonical or unknown tool life
       spoolDir: path.join(tmpDir, 'incoming'),
     },
     auditReview: {
+      notification: { enabled: true, mode: 'feishu_bot' },
       intervalMinutes: 30,
       lookbackOverlapMinutes: 5,
       maxEventsPerReview: 500,
@@ -1238,30 +1239,11 @@ test('audit review ingests all events and reviews canonical or unknown tool life
       const userMsg = input.find((message) => message.role === 'user');
       const payload = JSON.parse(userMsg.content);
       capturedPayloads.push(payload);
+      assert.equal(payload.candidates, undefined, 'LLM receives one full Trace, not window candidates');
       return {
-        type: 'audit_review',
-        review_id: payload.review_id,
-        window: payload.window,
-        summary: {
-          title: 'Alias event review',
-          overview: 'Canonical events and mapped tool semantics reached the reviewer.',
-          severity_counts: { critical: 0, high: 1, medium: 0, low: 0 },
-        },
-        findings: [
-          {
-            category: 'high_risk_permission',
-            severity: 'high',
-            agent_id: payload.candidates[0]?.agent_id ?? 'agent-test',
-            tool_name: payload.candidates[0]?.tool_name ?? 'db.delete',
-            trace_id: payload.candidates[0]?.trace_id ?? 'trace-alias',
-            entity: payload.candidates[0]?.entity ?? null,
-            title: 'Canonical event with mapped tool type',
-            summary: 'Reviewer received mapped tool semantics.',
-            recommendation: 'Verify delete authorization.',
-            evidence_event_ids: [payload.candidates[0]?.event_id ?? 1],
-            requires_action: true,
-          },
-        ],
+        risk_level: 'low',
+        risk_reason: '任务仅记录了工具调用，缺少明确终止事件，现有完整证据不能确认用户目标已达成，因此保留低风险待确认结论。',
+        evidence_event_ids: [payload.events[0].event_id],
       };
     },
   };
@@ -1276,15 +1258,20 @@ test('audit review ingests all events and reviews canonical or unknown tool life
     llmClient: fakeLlmClient,
     model: 'test-model',
   });
+  const enqueued = [];
   const notifier = createReviewNotifier({
+    db,
+    feishuMode: 'live',
     outboxStore: {
       enqueue(item) {
+        enqueued.push(item);
         return { event_id: `fake_evt_${item.type}` };
       },
     },
     config,
   });
   const visualization = createVisualization({
+    db,
     reviewStore,
     config: {
       auditReview: {
@@ -1380,24 +1367,84 @@ test('audit review ingests all events and reviews canonical or unknown tool life
     assert.ok(spooled.includes('"event":"tool_end"'));
     assert.ok(spooled.includes(unknownTraceId));
 
-    const sawCombinedAutoReview = await waitFor(() =>
-      capturedPayloads.some((payload) =>
-        payload.candidates.some((candidate) => candidate.trace_id === aliasTraceId) &&
-        payload.candidates.some((candidate) => candidate.trace_id === unknownTraceId)));
-    assert.equal(sawCombinedAutoReview, true);
+    const aggregated = await waitFor(() => db.prepare('SELECT COUNT(*) AS n FROM audit_traces').get().n === 2);
+    assert.equal(aggregated, true, 'HTTP ingest must automatically schedule Trace aggregation');
+    assert.equal(capturedPayloads.length, 0, 'unsealed tasks are not sent to LLM');
+    const auth = { Authorization: 'Bearer test-token-123' };
+    const getTrace = async (traceId) => {
+      const response = await fetch(`${baseUrl}/v1/audit-logs?agent_id=agent-test&trace_id=${traceId}`, { headers: auth });
+      assert.equal(response.status, 200);
+      const result = await response.json();
+      assert.equal(result.count, 1);
+      return result.traces[0];
+    };
+    assert.equal((await getTrace(aliasTraceId)).audit_result, null);
 
-    const payload = capturedPayloads.find((candidatePayload) =>
-      candidatePayload.candidates.some((candidate) => candidate.trace_id === aliasTraceId) &&
-      candidatePayload.candidates.some((candidate) => candidate.trace_id === unknownTraceId));
-    assert.equal(payload.candidates.length, 2);
-    assert.equal(payload.candidates[0].trace_id, aliasTraceId);
-    assert.equal(payload.candidates[0].tool_name, 'db.delete');
-    assert.equal(payload.candidates[0].event, 'tool.end');
-    assert.equal(payload.candidates[0].mapped_tool_type, 'delete');
-    assert.ok(payload.candidates.some((candidate) => candidate.trace_id === unknownTraceId));
-    assert.ok(payload.candidates.every((candidate) => candidate.mapped_tool_type === 'delete'));
+    // Advance the scheduler clock, then exercise the authenticated HTTP entry point.
+    schedulerNow = new Date('2026-07-08T12:00:00.000Z');
+    const manual = await fetch(`${baseUrl}/v1/audit-reviews/run`, { method: 'POST', headers: auth });
+    assert.equal(manual.status, 202);
+    assert.equal((await manual.json()).status, 'completed');
+    assert.equal(capturedPayloads.length, 2, 'each sealed Trace receives its own LLM request');
+    assert.deepEqual(capturedPayloads.map((p) => p.trace_id).sort(), [aliasTraceId, unknownTraceId].sort());
+    for (const payload of capturedPayloads) {
+      assert.equal(payload.agent_id, 'agent-test');
+      assert.equal(payload.events.length, 1);
+      assert.equal(payload.events[0].tool_name, 'db.delete');
+    }
+    assert.equal(capturedPayloads.find((p) => p.trace_id === aliasTraceId).events[0].event, 'tool.end');
+    assert.equal(capturedPayloads.find((p) => p.trace_id === unknownTraceId).events[0].event, 'unknown');
+    const findings = await fetch(`${baseUrl}/v1/audit-findings?agent_id=agent-test`, { headers: auth });
+    assert.equal(findings.status, 200);
+    assert.ok((await findings.json()).results.some((finding) => finding.trace_id === aliasTraceId),
+      'deterministic Finding evidence remains available alongside Trace conclusions');
+    for (const traceId of [aliasTraceId, unknownTraceId]) {
+      const trace = await getTrace(traceId);
+      assert.ok(trace.audit_result, JSON.stringify(db.prepare('SELECT risk_reason, review_error FROM audit_traces WHERE trace_id=?').get(traceId)));
+      assert.equal(trace.audit_result.trace_status, 'incomplete');
+      assert.equal(trace.audit_result.risk_level, 'low');
+      assert.equal(trace.audit_result.review_version, 1);
+      assert.equal(trace.events.length, 1);
+      assert.deepEqual(trace.audit_result.evidence_event_ids, [trace.events[0].event_id]);
+      assert.equal(trace.events[0].raw_json.event, traceId === aliasTraceId ? 'tool_end' : 'tool.finish');
+      const dashboard = await fetch(`${baseUrl}/dashboard/agents/agent-test/traces/${traceId}`);
+      assert.equal(dashboard.status, 200);
+      const html = await dashboard.text();
+      assert.ok(html.includes('待确认'));
+      assert.ok(html.includes(trace.events[0].raw_json.event));
+      assert.ok(html.includes(`事件 ID ${trace.events[0].event_id}`));
+    }
+    assert.equal(enqueued.length, 0, 'low-risk traces do not notify');
+
+    // A real late terminal event must reopen, re-review and become visible everywhere.
+    const failed = await fetch(`${baseUrl}/v1/ingest`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(makeUpstreamEvent({ ts: '2026-07-08T10:01:00.000Z',
+        trace_id: aliasTraceId, event: 'run.failed', status: 'INTERNAL',
+        span_id: 'terminal', agent_result: '最终执行失败', result_summary: 'terminal failure' })),
+    });
+    assert.equal(failed.status, 202);
+    assert.equal((await failed.json()).accepted, 1);
+    assert.equal(await waitFor(() => db.prepare('SELECT review_version FROM audit_traces WHERE trace_id=?').get(aliasTraceId)?.review_version === 2), true);
+    const revised = await getTrace(aliasTraceId);
+    assert.equal(revised.audit_result.risk_level, 'high');
+    assert.equal(revised.audit_result.trace_status, 'failed');
+    assert.equal(revised.agent_result, '最终执行失败');
+    assert.equal(revised.events.length, 2, 'late revision retains original evidence');
+    assert.equal(await waitFor(() => enqueued.length === 1), true);
+    assert.equal(enqueued[0].type, 'audit_trace_high_risk');
+    assert.ok(JSON.stringify(enqueued[0].payload).includes(`/dashboard/agents/agent-test/traces/${aliasTraceId}`));
+    const detail = await fetch(`${baseUrl}/dashboard/agents/agent-test/traces/${aliasTraceId}`);
+    assert.equal(detail.status, 200);
+    assert.ok((await detail.text()).includes('需要介入'));
+    const callsBefore = capturedPayloads.length;
+    const repeat = await fetch(`${baseUrl}/v1/audit-reviews/run`, { method: 'POST', headers: auth });
+    assert.equal(repeat.status, 202);
+    assert.equal(capturedPayloads.length, callsBefore, 'unchanged Trace is not reviewed twice');
+    assert.equal(enqueued.length, 1, 'repeated scheduling must not enqueue another high-risk notification');
   } finally {
-    app.close();
+    scheduler.stop();
+    await new Promise((resolve) => app.close(resolve));
     db.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
