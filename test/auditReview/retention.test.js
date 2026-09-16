@@ -77,8 +77,9 @@ function makeConfig(rootDir, overrides = {}) {
     retention: {
       enabled: true,
       runAtHour: 4,
-      eventsHours: 48,
-      maxEventsPerAgent: 200,
+      traceDays: 30,
+      highRiskTraceDays: 90,
+      maxTracesPerAgent: 2000,
       runtimeRunsDays: 30,
       waitingStatesDays: 30,
       llmUsageDays: 90,
@@ -118,6 +119,8 @@ function insertEvent(db, id, ts, agentId = 'agent') {
     agent_id: agentId,
     span_id: `span-${suffix}`,
   });
+  db.prepare('UPDATE audit_events SET ingested_at = ts WHERE id = ?').run(result.lastInsertRowid);
+  db.prepare(`INSERT OR REPLACE INTO audit_trace_scan_cursor VALUES ('trace_aggregation', '2026-07-06T12:00:00.000Z', 99999, '2026-07-06T12:00:00.000Z')`).run();
   return Number(result.lastInsertRowid);
 }
 
@@ -335,6 +338,9 @@ test('retention dry-run reports expired dashboard rows without deleting data', (
   assert.equal(result.dryRun, true);
   assert.deepEqual(result.deleted, {
     auditEvents: 1,
+    auditTraces: 0,
+    traceReviews: 0,
+    traceNotifications: 0,
     agentRuns: 0,
     agentRunSteps: 0,
     agentWaitingStates: 0,
@@ -582,13 +588,13 @@ test('retention removes old occurrences while rebasing a finding onto retained e
     now: () => new Date('2026-07-06T12:00:00.000Z'),
   });
 
-  const oldEventId = insertEvent(db, 'old-source', '2026-07-03T00:00:00.000Z');
+  const oldEventId = insertEvent(db, 'old-source', '2026-05-03T00:00:00.000Z');
   const freshEventId = insertEvent(db, 'fresh-source', '2026-07-05T00:00:00.000Z');
-  insertReviewRun(db, 'old-review', '2026-07-03T00:00:00.000Z', { findingCount: 1 });
+  insertReviewRun(db, 'old-review', '2026-05-03T00:00:00.000Z', { findingCount: 1 });
   insertReviewRun(db, 'fresh-review', '2026-07-05T00:00:00.000Z', { findingCount: 1 });
   insertFinding(db, 'recurring-finding', {
     status: 'open',
-    createdAt: '2026-07-03T00:00:00.000Z',
+    createdAt: '2026-05-03T00:00:00.000Z',
     lastSeenAt: '2026-07-05T00:00:00.000Z',
     reviewId: 'old-review',
     evidenceEventIds: [freshEventId],
@@ -597,7 +603,7 @@ test('retention removes old occurrences while rebasing a finding onto retained e
   insertOccurrence(db, 'old-occurrence', {
     findingId: 'recurring-finding',
     reviewId: 'old-review',
-    observedAt: '2026-07-03T00:00:00.000Z',
+    observedAt: '2026-05-03T00:00:00.000Z',
     evidenceEventIds: [oldEventId],
     evidenceJson: JSON.stringify([{ event_id: oldEventId, raw_json: '{"source":"old"}' }]),
     severity: 'medium',
@@ -651,131 +657,6 @@ test('retention removes old occurrences while rebasing a finding onto retained e
     last_seen_at: '2026-07-05T00:00:00.000Z',
   });
   assert.equal(JSON.parse(finding.evidence_json)[0].raw_json, '{"source":"fresh"}');
-
-  db.close();
-  fs.rmSync(rootDir, { recursive: true, force: true });
-});
-
-test('retention removes dashboard data whose source event is pruned by the per-agent limit', () => {
-  const rootDir = tmpDir();
-  const db = makeDb();
-  const service = createRetentionService({
-    db,
-    config: makeConfig(rootDir, { retention: { maxEventsPerAgent: 2 } }),
-    cursorStore: createIngestCursorStore(db),
-    now: () => new Date('2026-07-06T12:00:00.000Z'),
-  });
-
-  const eventIds = [
-    insertEvent(db, 'one', '2026-07-05T00:00:00.000Z', 'limited-agent'),
-    insertEvent(db, 'two', '2026-07-05T00:01:00.000Z', 'limited-agent'),
-    insertEvent(db, 'three', '2026-07-05T00:02:00.000Z', 'limited-agent'),
-  ];
-  for (let index = 0; index < eventIds.length; index++) {
-    const number = index + 1;
-    const reviewId = `limited-review-${number}`;
-    const findingId = `limited-finding-${number}`;
-    const observedAt = `2026-07-05T00:0${index}:00.000Z`;
-    insertReviewRun(db, reviewId, observedAt, { findingCount: 1 });
-    insertFinding(db, findingId, {
-      status: 'open',
-      createdAt: observedAt,
-      reviewId,
-      evidenceEventIds: [eventIds[index]],
-    });
-    insertOccurrence(db, `limited-occurrence-${number}`, {
-      findingId,
-      reviewId,
-      observedAt,
-      evidenceEventIds: [eventIds[index]],
-    });
-  }
-
-  const result = service.run();
-
-  assert.equal(result.deleted.auditEvents, 1);
-  assert.equal(result.deleted.findingOccurrences, 1);
-  assert.equal(result.deleted.findings, 1);
-  assert.equal(result.deleted.reviewRuns, 1);
-  assert.deepEqual(
-    db.prepare(`SELECT finding_id FROM audit_review_findings ORDER BY finding_id`).all().map((row) => row.finding_id),
-    ['limited-finding-2', 'limited-finding-3'],
-  );
-  assert.deepEqual(
-    db.prepare(`SELECT review_id FROM audit_review_runs ORDER BY review_id`).all().map((row) => row.review_id),
-    ['limited-review-2', 'limited-review-3'],
-  );
-
-  db.close();
-  fs.rmSync(rootDir, { recursive: true, force: true });
-});
-
-test('retention removes audit events older than 48 hours per agent', () => {
-  const rootDir = tmpDir();
-  const db = makeDb();
-  const service = createRetentionService({
-    db,
-    config: makeConfig(rootDir),
-    cursorStore: createIngestCursorStore(db),
-    now: () => new Date('2026-07-06T12:00:00.000Z'),
-  });
-
-  insertEvent(db, 'a-old', '2026-07-04T11:59:59.999Z', 'agent-a');
-  insertEvent(db, 'a-boundary', '2026-07-04T12:00:00.000Z', 'agent-a');
-  insertEvent(db, 'a-fresh', '2026-07-05T00:00:00.000Z', 'agent-a');
-  insertEvent(db, 'b-old', '2026-07-04T10:00:00.000Z', 'agent-b');
-  insertEvent(db, 'b-fresh', '2026-07-06T00:00:00.000Z', 'agent-b');
-
-  const result = service.run();
-
-  assert.equal(result.deleted.auditEvents, 2);
-  assert.deepEqual(
-    db.prepare(`SELECT agent_id, row_hash FROM audit_events ORDER BY agent_id, ts`).all(),
-    [
-      { agent_id: 'agent-a', row_hash: 'hash-agent-a-a-boundary' },
-      { agent_id: 'agent-a', row_hash: 'hash-agent-a-a-fresh' },
-      { agent_id: 'agent-b', row_hash: 'hash-agent-b-b-fresh' },
-    ],
-  );
-
-  db.close();
-  fs.rmSync(rootDir, { recursive: true, force: true });
-});
-
-test('retention keeps only the latest 200 audit events for each agent', () => {
-  const rootDir = tmpDir();
-  const db = makeDb();
-  const service = createRetentionService({
-    db,
-    config: makeConfig(rootDir),
-    cursorStore: createIngestCursorStore(db),
-    now: () => new Date('2026-07-06T12:00:00.000Z'),
-  });
-
-  const start = Date.parse('2026-07-05T00:00:00.000Z');
-  for (let i = 1; i <= 205; i++) {
-    insertEvent(db, i, new Date(start + i * 60 * 1000).toISOString(), 'agent-a');
-  }
-  for (let i = 1; i <= 200; i++) {
-    insertEvent(db, i, new Date(start + i * 60 * 1000).toISOString(), 'agent-b');
-  }
-
-  const result = service.run({ batchSize: 2 });
-
-  assert.equal(result.deleted.auditEvents, 5);
-  assert.ok(result.batches.auditEvents.every((n) => n <= 2), 'audit_events delete batches should respect batchSize');
-  assert.deepEqual(
-    db.prepare(`SELECT COUNT(*) AS count FROM audit_events WHERE agent_id = 'agent-a'`).get().count,
-    200,
-  );
-  assert.deepEqual(
-    db.prepare(`SELECT COUNT(*) AS count FROM audit_events WHERE agent_id = 'agent-b'`).get().count,
-    200,
-  );
-  assert.deepEqual(
-    db.prepare(`SELECT row_hash FROM audit_events WHERE agent_id = 'agent-a' ORDER BY ts ASC LIMIT 1`).get().row_hash,
-    'hash-agent-a-6',
-  );
 
   db.close();
   fs.rmSync(rootDir, { recursive: true, force: true });
@@ -1206,4 +1087,171 @@ test('prune CLI rejects invalid batch size before cleanup', () => {
   verifyDb.close();
 
   fs.rmSync(rootDir, { recursive: true, force: true });
+});
+function insertTrace(db, traceId, lastEventAt, overrides = {}) {
+  const row = {
+    agent_id: 'agent', trace_id: traceId, last_event_at: lastEventAt,
+    updated_at: lastEventAt, ingested_watermark: lastEventAt,
+    sealed_at: lastEventAt, sealed_reason: 'terminal_event', review_version: 1,
+    risk_level: 'none', review_error: 0, review_retry_count: 0, event_count: 1, ...overrides,
+  };
+  const keys = Object.keys(row);
+  db.prepare(`INSERT INTO audit_traces (${keys.join(',')}) VALUES (${keys.map(k => `@${k}`).join(',')})`).run(row);
+  const id = insertEvent(db, traceId, lastEventAt, row.agent_id);
+  db.prepare('UPDATE audit_events SET trace_id = ? WHERE id = ?').run(traceId, id);
+  return id;
+}
+
+function traceService(db, retention = {}, traceReview = {}) {
+  return createRetentionService({ db, config: { retention, auditReview: { traceReview } }, now: () => new Date('2026-07-06T12:00:00.000Z') });
+}
+
+test('Trace retention preserves complete recent and high-risk evidence and removes whole expired traces', t => {
+  const db = makeDb(); t.after(() => db.close());
+  insertTrace(db, 'expired', '2026-06-01T00:00:00.000Z');
+  const retained = insertTrace(db, 'recent', '2026-07-05T00:00:00.000Z');
+  const oldEvidence = insertEvent(db, 'old-evidence', '2026-01-01T00:00:00.000Z');
+  db.prepare("UPDATE audit_events SET trace_id = 'recent' WHERE id = ?").run(oldEvidence);
+  db.prepare("UPDATE audit_traces SET event_count = 2 WHERE trace_id = 'recent'").run();
+  insertTrace(db, 'high', '2026-05-01T00:00:00.000Z', { risk_level: 'high' });
+  insertTrace(db, 'expired-high', '2026-03-01T00:00:00.000Z', { risk_level: 'high' });
+  insertTrace(db, 'boundary', '2026-06-06T12:00:00.000Z');
+  insertFinding(db, 'high-evidence', { status: 'open', createdAt: '2026-05-01T00:00:00.000Z', evidenceEventIds: [retained, oldEvidence] });
+  const svc = traceService(db);
+  const preview = svc.pruneAuditEvents({ dryRun: true, batchSize: 1 });
+  assert.equal(count(db, 'audit_traces'), 5);
+  const actual = svc.pruneAuditEvents({ batchSize: 1 });
+  assert.deepEqual(actual.deleted, preview.deleted);
+  assert.equal(actual.deleted.auditTraces, 2);
+  assert.equal(actual.deleted.auditEvents, 2);
+  assert.equal(count(db, 'audit_events'), 4);
+  assert.equal(count(db, 'audit_review_findings'), 1);
+});
+
+test('unsealed, unreviewed and retrying traces are protected; backfill and exhausted failures expire', t => {
+  const db = makeDb(); t.after(() => db.close());
+  const old = '2026-01-01T00:00:00.000Z';
+  insertTrace(db, 'active', old, { sealed_at: null });
+  insertTrace(db, 'queued', old, { review_version: 0 });
+  insertTrace(db, 'retrying', old, { review_version: 0, review_error: 1, review_retry_count: 1 });
+  insertTrace(db, 'exhausted', old, { review_version: 0, review_error: 1, review_retry_count: 2 });
+  insertTrace(db, 'history', old, { review_version: 0, sealed_reason: 'backfill', risk_level: 'unreviewed' });
+  let svc = traceService(db);
+  assert.equal(svc.countFailedTracesPendingCleanup(), 1);
+  svc = traceService(db); // A new service must use persisted retries, not memory.
+  const result = svc.pruneAuditEvents();
+  assert.equal(result.deleted.auditTraces, 2);
+  assert.equal(count(db, 'audit_events'), 3);
+  assert.equal(svc.countFailedTracesPendingCleanup(), 0);
+});
+
+test('orphan sweep requires a cursor and strictly earlier ingest time; NULL and unscanned events survive', t => {
+  const db = makeDb(); t.after(() => db.close());
+  const ids = ['before', 'equal', 'after', 'null'].map(id => insertEvent(db, id, '2026-01-01T00:00:00.000Z'));
+  const ingest = ['2026-06-01T00:00:00.000Z', '2026-06-02T00:00:00.000Z', '2026-06-03T00:00:00.000Z', null];
+  ids.forEach((id, i) => db.prepare('UPDATE audit_events SET ingested_at = ? WHERE id = ?').run(ingest[i], id));
+  db.prepare('DELETE FROM audit_trace_scan_cursor').run();
+  const svc = traceService(db);
+  assert.equal(svc.pruneAuditEvents().deleted.auditEvents, 0);
+  db.prepare("INSERT INTO audit_trace_scan_cursor VALUES ('trace_aggregation', ?, 999, ?)").run(ingest[1], ingest[1]);
+  assert.equal(svc.pruneAuditEvents().deleted.auditEvents, 1);
+  assert.equal(count(db, 'audit_events'), 3);
+});
+
+test('capacity prunes whole oldest eligible traces per agent, never slices a large trace', t => {
+  const db = makeDb(); t.after(() => db.close());
+  for (const agent of ['a', 'b']) {
+    for (let i = 1; i <= 3; i++) insertTrace(db, `task${i}`, `2026-07-0${i}T00:00:00.000Z`, { agent_id: agent });
+  }
+  for (let i = 0; i < 210; i++) {
+    const id = insertEvent(db, `large${i}`, '2026-07-03T00:00:00.000Z', 'a');
+    db.prepare("UPDATE audit_events SET trace_id = 'task3' WHERE id = ?").run(id);
+  }
+  const svc = traceService(db, { maxTracesPerAgent: 2 });
+  db.prepare("UPDATE audit_traces SET event_count = 211 WHERE agent_id = 'a' AND trace_id = 'task3'").run();
+  assert.equal(svc.pruneAuditEvents({ batchSize: 1 }).deleted.auditTraces, 2);
+  assert.equal(count(db, 'audit_events'), 214);
+});
+
+test('late unaggregated evidence protects an otherwise expired trace', t => {
+  const db = makeDb(); t.after(() => db.close());
+  const id = insertTrace(db, 'late', '2026-01-01T00:00:00.000Z');
+  db.prepare("UPDATE audit_events SET ingested_at = '2026-07-06T00:00:00.000Z' WHERE id = ?").run(id);
+  assert.equal(traceService(db).pruneAuditEvents().deleted.auditTraces, 0);
+});
+
+test('partial legacy evidence is pruned without losing surviving snapshots', t => {
+  const db = makeDb(); t.after(() => db.close());
+  const expired = insertTrace(db, 'expired', '2026-01-01T00:00:00.000Z');
+  const recent = insertTrace(db, 'recent', '2026-07-05T00:00:00.000Z');
+  insertFinding(db, 'mixed', { status: 'open', createdAt: '2026-07-05T00:00:00.000Z', evidenceEventIds: [expired, recent], evidenceJson: JSON.stringify([{ event_id: expired }, { event_id: recent }]) });
+  traceService(db).pruneAuditEvents();
+  const row = db.prepare("SELECT * FROM audit_review_findings WHERE finding_id = 'mixed'").get();
+  assert.deepEqual(JSON.parse(row.evidence_event_ids_json), [recent]);
+  assert.deepEqual(JSON.parse(row.evidence_json), [{ event_id: recent }]);
+});
+test('Trace cleanup removes review history and notification receipts but preserves stored digest slots', t => {
+  const db = makeDb(); t.after(() => db.close());
+  insertTrace(db, 'expired', '2026-01-01T00:00:00.000Z');
+  insertTrace(db, 'retained', '2026-07-05T00:00:00.000Z');
+  for (const trace of ['expired', 'retained']) {
+    db.prepare(`INSERT INTO audit_trace_reviews (agent_id, trace_id, review_version, trace_status, risk_level, reviewed_at) VALUES ('agent', ?, 1, 'success', 'none', '2026-01-01')`).run(trace);
+    db.prepare(`INSERT INTO audit_trace_notifications VALUES ('agent', ?, '2026-01-01')`).run(trace);
+  }
+  db.prepare(`INSERT INTO audit_notification_digest_slots (slot_key, report_date, slot_hour, scheduled_for, trigger_type, status) VALUES ('old-digest', '2026-01-01', 10, '2026-01-01T02:00:00Z', 'scheduled', 'completed')`).run();
+  const digest = db.prepare('SELECT * FROM audit_notification_digest_slots').all();
+  const service = traceService(db);
+  const preview = service.pruneAuditEvents({ dryRun: true });
+  const actual = service.pruneAuditEvents();
+  assert.deepEqual(actual.deleted, preview.deleted);
+  assert.equal(actual.deleted.traceReviews, 1);
+  assert.equal(actual.deleted.traceNotifications, 1);
+  assert.equal(count(db, 'audit_trace_notifications'), 1);
+  assert.deepEqual(db.prepare('SELECT * FROM audit_notification_digest_slots').all(), digest);
+});
+
+test('failed Trace deletion rolls back evidence, review history and notification receipts', t => {
+  const db = makeDb(); t.after(() => db.close());
+  insertTrace(db, 'expired', '2026-01-01T00:00:00.000Z');
+  db.prepare(`INSERT INTO audit_trace_notifications VALUES ('agent', 'expired', '2026-01-01')`).run();
+  db.exec(`CREATE TRIGGER block_trace_delete BEFORE DELETE ON audit_traces BEGIN SELECT RAISE(ABORT, 'test rollback'); END`);
+  assert.throws(() => traceService(db).pruneAuditEvents(), /test rollback/);
+  assert.equal(count(db, 'audit_events'), 1);
+  assert.equal(count(db, 'audit_traces'), 1);
+  assert.equal(count(db, 'audit_trace_notifications'), 1);
+});
+
+test('same-millisecond unaggregated event survives age and capacity cleanup until event count catches up', t => {
+  const db = makeDb(); t.after(() => db.close());
+  const old = '2026-01-01T00:00:00.000Z';
+  const first = insertTrace(db, 'same-ms', old);
+  const late = insertEvent(db, 'late-same-ms', old);
+  assert.ok(late > first);
+  db.prepare("UPDATE audit_events SET trace_id = 'same-ms' WHERE id = ?").run(late);
+  insertTrace(db, 'newer', '2026-07-05T00:00:00.000Z');
+  const svc = traceService(db, { maxTracesPerAgent: 1 });
+  assert.equal(svc.pruneAuditEvents({ dryRun: true, batchSize: 1 }).deleted.auditTraces, 0);
+  assert.equal(svc.pruneAuditEvents({ batchSize: 1 }).deleted.auditEvents, 0);
+  assert.equal(count(db, 'audit_events'), 3);
+  db.prepare("UPDATE audit_traces SET event_count = 2 WHERE trace_id = 'same-ms'").run();
+  const preview = svc.pruneAuditEvents({ dryRun: true, batchSize: 1 });
+  const actual = svc.pruneAuditEvents({ batchSize: 1 });
+  assert.deepEqual(actual.deleted, preview.deleted);
+  assert.equal(actual.deleted.auditTraces, 1);
+  assert.equal(actual.deleted.auditEvents, 2);
+  assert.deepEqual(actual.batches.auditEvents, [1, 1]);
+});
+
+test('pending cleanup health includes exhausted re-reviews with existing conclusions and respects guards', t => {
+  const db = makeDb(); t.after(() => db.close());
+  const old = '2026-01-01T00:00:00.000Z';
+  insertTrace(db, 'reviewed-failed', old, { review_version: 3, review_error: 1, review_retry_count: 2 });
+  insertTrace(db, 'reviewed-retrying', old, { review_version: 2, review_error: 1, review_retry_count: 1 });
+  insertTrace(db, 'recent-failed', '2026-07-05T00:00:00.000Z', { review_version: 1, review_error: 1, review_retry_count: 2 });
+  insertTrace(db, 'unsealed-failed', old, { sealed_at: null, review_version: 1, review_error: 1, review_retry_count: 2 });
+  const svc = traceService(db);
+  assert.equal(svc.countFailedTracesPendingCleanup(), 1);
+  assert.equal(traceService(db).countFailedTracesPendingCleanup(), 1);
+  svc.pruneAuditEvents({ batchSize: 1 });
+  assert.equal(svc.countFailedTracesPendingCleanup(), 0);
 });

@@ -25,8 +25,9 @@
   "retention": {
     "enabled": true,
     "runAtHour": 4,
-    "eventsHours": 48,
-    "maxEventsPerAgent": 200,
+    "traceDays": 30,
+    "highRiskTraceDays": 90,
+    "maxTracesPerAgent": 2000,
     "runtimeRunsDays": 30,
     "waitingStatesDays": 30,
     "llmUsageDays": 90,
@@ -42,6 +43,12 @@
     "initialDelaySeconds": 30,
     "lookbackOverlapMinutes": 5,
     "maxEventsPerReview": 500,
+    "traceReview": {
+      "idleTimeoutMinutes": 60,
+      "waitingUserTimeoutMinutes": 1440,
+      "maxEventsPerTrace": 2000,
+      "maxInvalidOutputRetries": 2
+    },
     "notification": {
       "enabled": true,
       "mode": "feishu_bot",
@@ -63,6 +70,7 @@
     "http": {
       "bindHost": "0.0.0.0",
       "requireDashboardToken": false,
+      "requireHttpsBaseUrl": true,
       "allowedOrigins": []
     },
     "riskPolicy": {

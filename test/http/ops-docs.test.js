@@ -8,6 +8,16 @@ function readText(filePath) {
 
 test('config.json exposes retention defaults for runtime data and owned files', () => {
   const config = JSON.parse(readText('config.json'));
+  const container = JSON.parse(readText('config.container.json'));
+  for (const current of [config, container]) {
+    assert.equal('eventsHours' in current.retention, false);
+    assert.equal('maxEventsPerAgent' in current.retention, false);
+    assert.equal(current.retention.traceDays, 30);
+    assert.equal(current.retention.highRiskTraceDays, 90);
+    assert.equal(current.retention.maxTracesPerAgent, 2000);
+  }
+  assert.equal(config.auditReview.http.requireHttpsBaseUrl, false);
+  assert.equal(container.auditReview.http.requireHttpsBaseUrl, true);
 
   assert.equal(config.tmpDir, 'data/tmp');
   assert.equal(config.capturesDir, 'data/captures');
@@ -15,8 +25,9 @@ test('config.json exposes retention defaults for runtime data and owned files', 
   assert.deepEqual(
     {
       runtimeRunsDays: config.retention.runtimeRunsDays,
-      eventsHours: config.retention.eventsHours,
-      maxEventsPerAgent: config.retention.maxEventsPerAgent,
+      traceDays: config.retention.traceDays,
+      highRiskTraceDays: config.retention.highRiskTraceDays,
+      maxTracesPerAgent: config.retention.maxTracesPerAgent,
       waitingStatesDays: config.retention.waitingStatesDays,
       llmUsageDays: config.retention.llmUsageDays,
       logFilesDays: config.retention.logFilesDays,
@@ -25,8 +36,9 @@ test('config.json exposes retention defaults for runtime data and owned files', 
     },
     {
       runtimeRunsDays: 30,
-      eventsHours: 48,
-      maxEventsPerAgent: 200,
+      traceDays: 30,
+      highRiskTraceDays: 90,
+      maxTracesPerAgent: 2000,
       waitingStatesDays: 30,
       llmUsageDays: 90,
       logFilesDays: 14,
@@ -75,8 +87,11 @@ test('Dokploy deployment guide covers required deployment, security, and recover
     assert.ok(guide.includes(required), `deployment guide should include ${required}`);
   }
 
-  assert.match(guide, /(严禁|不得)[^\n]*直接暴露[^\n]*服务/);
-  assert.match(guide, /限制[^\n]*未认证[^\n]*来源/);
+  assert.match(guide, /公网只发布 HTTPS/);
+  assert.match(guide, /不发布公网写入 router/);
+  assert.match(guide, /requireHttpsBaseUrl=true/);
+  assert.match(guide, /公网 router 不发布它/);
+  assert.match(guide, /http:\/\/127\.0\.0\.1:9320\/health/);
 });
 
 test('Dokploy compose passes the dashboard base URL environment variable into the container', () => {

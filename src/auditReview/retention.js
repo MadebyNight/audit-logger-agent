@@ -2,17 +2,15 @@ import fs from 'fs';
 import path from 'path';
 
 const DEFAULT_BATCH_SIZE = 5000;
-const DEFAULT_AUDIT_EVENT_MAX_AGE_HOURS = 48;
-const DEFAULT_AUDIT_EVENT_MAX_PER_AGENT = 200;
-const MS_PER_HOUR = 60 * 60 * 1000;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const TERMINAL_RUN_STATUSES_SQL = `'completed', 'failed', 'cancelled'`;
 
 const DEFAULT_RETENTION = {
   enabled: true,
   runAtHour: 4,
-  eventsHours: DEFAULT_AUDIT_EVENT_MAX_AGE_HOURS,
-  maxEventsPerAgent: DEFAULT_AUDIT_EVENT_MAX_PER_AGENT,
+  traceDays: 30,
+  highRiskTraceDays: 90,
+  maxTracesPerAgent: 2000,
   runtimeRunsDays: 30,
   waitingStatesDays: 30,
   llmUsageDays: 90,
@@ -40,10 +38,6 @@ function cutoffIso(now, days) {
   return new Date(now.getTime() - days * MS_PER_DAY).toISOString();
 }
 
-function cutoffIsoHours(now, hours) {
-  return new Date(now.getTime() - hours * MS_PER_HOUR).toISOString();
-}
-
 function cutoffDay(now, days) {
   return cutoffIso(now, days).slice(0, 10);
 }
@@ -60,17 +54,6 @@ function safeLimit(value) {
 function safePositiveInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function reportDayStartIso(nowDate, timezoneOffsetMinutes = 480) {
-  const parsed = Number(timezoneOffsetMinutes);
-  const offset = Number.isFinite(parsed) && parsed >= -1440 && parsed <= 1440 ? Math.trunc(parsed) : 480;
-  const shifted = new Date(nowDate.getTime() + offset * 60 * 1000);
-  return new Date(Date.UTC(
-    shifted.getUTCFullYear(),
-    shifted.getUTCMonth(),
-    shifted.getUTCDate(),
-  ) - offset * 60 * 1000).toISOString();
 }
 
 function countRows(db, sql, params) {
@@ -102,26 +85,39 @@ function safeEvidenceArraySql(column) {
   END`;
 }
 
+// Shared selection keeps dry-run and real cleanup identical. Pending traces are
+// protected from both age and capacity pruning so their evidence stays complete.
 function survivingAuditEventsCte() {
-  return `
-    WITH ranked_historical_events AS (
-      SELECT
-        id,
-        ROW_NUMBER() OVER (
-          PARTITION BY agent_id
-          ORDER BY ts DESC, rowid DESC
-        ) AS retained_rank
-      FROM audit_events
-      WHERE ts >= @auditCutoff AND ts < @preserveFrom
-    ),
-    surviving_events AS (
-      SELECT events.id
-      FROM audit_events events
-      LEFT JOIN ranked_historical_events ranked ON ranked.id = events.id
-      WHERE events.ts >= @auditCutoff
-        AND (events.ts >= @preserveFrom OR ranked.retained_rank <= @maxPerAgent)
+  return `WITH ranked_traces AS (
+    SELECT *, ROW_NUMBER() OVER (
+      PARTITION BY agent_id ORDER BY last_event_at DESC, trace_id ASC
+    ) AS retained_rank FROM audit_traces
+  ), expired_traces AS (
+    SELECT agent_id, trace_id FROM ranked_traces
+    WHERE sealed_at IS NOT NULL
+      AND (review_version > 0 OR sealed_reason = 'backfill'
+        OR (review_error = 1 AND review_retry_count >= @maxRetries))
+      AND (last_event_at < CASE WHEN risk_level = 'high' THEN @highRiskCutoff ELSE @auditCutoff END
+        OR retained_rank > @maxPerAgent)
+      AND (SELECT COUNT(*) FROM audit_events e
+        WHERE e.agent_id = ranked_traces.agent_id AND e.trace_id = ranked_traces.trace_id
+      ) <= ranked_traces.event_count
+      AND NOT EXISTS (
+        SELECT 1 FROM audit_events e
+        WHERE e.agent_id = ranked_traces.agent_id AND e.trace_id = ranked_traces.trace_id
+          AND e.ingested_at > COALESCE(ranked_traces.ingested_watermark, ranked_traces.updated_at)
+      )
+  ), expired_events AS (
+    SELECT e.id FROM audit_events e WHERE EXISTS (
+      SELECT 1 FROM expired_traces t WHERE t.agent_id = e.agent_id AND t.trace_id = e.trace_id
+    ) OR (
+      e.ts < @auditCutoff
+      AND NOT EXISTS (SELECT 1 FROM audit_traces t WHERE t.agent_id = e.agent_id AND t.trace_id = e.trace_id)
+      AND e.ingested_at < (SELECT last_ingested_at FROM audit_trace_scan_cursor WHERE cursor_name = 'trace_aggregation')
     )
-  `;
+  ), surviving_events AS (
+    SELECT id FROM audit_events WHERE id NOT IN (SELECT id FROM expired_events)
+  )`;
 }
 
 function hasEvidenceIdsSql(column) {
@@ -137,18 +133,24 @@ function hasSurvivingEvidenceSql(column) {
 }
 
 function staleOccurrenceSql(alias = 'occurrences') {
-  return `(
-    ${alias}.observed_at < @auditCutoff
+  return `(EXISTS (SELECT 1 FROM audit_review_findings f JOIN expired_traces t ON t.agent_id = f.agent_id AND t.trace_id = f.trace_id WHERE f.finding_id = ${alias}.finding_id) OR (
+    (${alias}.observed_at < @auditCutoff AND NOT ${hasSurvivingEvidenceSql(`${alias}.evidence_event_ids_json`)})
     OR (
       ${hasEvidenceIdsSql(`${alias}.evidence_event_ids_json`)}
       AND NOT ${hasSurvivingEvidenceSql(`${alias}.evidence_event_ids_json`)}
     )
-  )`;
+  ) AND NOT EXISTS (SELECT 1 FROM audit_review_findings f JOIN audit_traces t
+    ON t.agent_id = f.agent_id AND t.trace_id = f.trace_id
+    WHERE f.finding_id = ${alias}.finding_id AND NOT EXISTS
+      (SELECT 1 FROM expired_traces x WHERE x.agent_id = t.agent_id AND x.trace_id = t.trace_id)))`;
 }
 
 function staleFindingSql(alias = 'findings') {
   return `(
-    ${alias}.last_seen_at < @auditCutoff
+    (${alias}.last_seen_at < @auditCutoff AND NOT ${hasSurvivingEvidenceSql(`${alias}.evidence_event_ids_json`)}
+      AND NOT EXISTS (SELECT 1 FROM audit_traces t WHERE t.agent_id = ${alias}.agent_id AND t.trace_id = ${alias}.trace_id
+        AND NOT EXISTS (SELECT 1 FROM expired_traces x WHERE x.agent_id = t.agent_id AND x.trace_id = t.trace_id)))
+    OR EXISTS (SELECT 1 FROM expired_traces t WHERE t.agent_id = ${alias}.agent_id AND t.trace_id = ${alias}.trace_id)
     OR (
       ${hasEvidenceIdsSql(`${alias}.evidence_event_ids_json`)}
       AND NOT ${hasSurvivingEvidenceSql(`${alias}.evidence_event_ids_json`)}
@@ -233,12 +235,13 @@ function rebaseFindingsFromOccurrences(db, findingIds) {
 
 function deleteExpiredFindingOccurrences(db, {
   auditCutoff,
-  preserveFrom,
+  highRiskCutoff,
+  maxRetries,
   maxPerAgent,
   batchSize,
   dryRun,
 }) {
-  const params = { auditCutoff, preserveFrom, maxPerAgent };
+  const params = { auditCutoff, highRiskCutoff, maxRetries, maxPerAgent };
   const cte = survivingAuditEventsCte();
   const predicate = staleOccurrenceSql();
   const total = countRows(db, `
@@ -281,12 +284,13 @@ function deleteExpiredFindingOccurrences(db, {
 
 function deleteExpiredFindings(db, {
   auditCutoff,
-  preserveFrom,
+  highRiskCutoff,
+  maxRetries,
   maxPerAgent,
   batchSize,
   dryRun,
 }) {
-  const params = { auditCutoff, preserveFrom, maxPerAgent };
+  const params = { auditCutoff, highRiskCutoff, maxRetries, maxPerAgent };
   const cte = survivingAuditEventsCte();
   const predicate = staleFindingSql();
   const total = countRows(db, `
@@ -320,7 +324,8 @@ function deleteExpiredFindings(db, {
 
 function deleteExpiredReviewRuns(db, {
   auditCutoff,
-  preserveFrom,
+  highRiskCutoff,
+  maxRetries,
   maxPerAgent,
   batchSize,
   dryRun,
@@ -378,7 +383,7 @@ function deleteExpiredReviewRuns(db, {
         LIMIT @limit
       )
     `,
-    params: { auditCutoff, preserveFrom, maxPerAgent },
+    params: { auditCutoff, highRiskCutoff, maxRetries, maxPerAgent },
     batchSize,
     dryRun,
   });
@@ -567,99 +572,68 @@ export function createRetentionService({ db, config, cursorStore = null, now = (
   if (!config) throw new Error('createRetentionService: config is required');
 
   function auditEventRetentionParams(cfg, nowDate) {
-    const eventMaxAgeHours = cfg.eventsHours
-      ?? cfg.auditEventsMaxAgeHours
-      ?? (cfg.eventsDays ? cfg.eventsDays * 24 : DEFAULT_AUDIT_EVENT_MAX_AGE_HOURS);
     return {
-      cutoff: cutoffIsoHours(nowDate, safePositiveNumber(eventMaxAgeHours, DEFAULT_AUDIT_EVENT_MAX_AGE_HOURS)),
-      preserveFrom: reportDayStartIso(nowDate, config?.report?.timezoneOffsetMinutes),
-      maxPerAgent: safePositiveInteger(
-        cfg.maxEventsPerAgent ?? cfg.auditEventsMaxPerAgent,
-        DEFAULT_AUDIT_EVENT_MAX_PER_AGENT,
-      ),
+      auditCutoff: cutoffIso(nowDate, safePositiveNumber(cfg.traceDays, 30)),
+      highRiskCutoff: cutoffIso(nowDate, safePositiveNumber(cfg.highRiskTraceDays, 90)),
+      maxPerAgent: safePositiveInteger(cfg.maxTracesPerAgent, 2000),
+      maxRetries: safePositiveInteger(config.auditReview?.traceReview?.maxInvalidOutputRetries, 2),
     };
   }
 
-  function deleteAuditEvents({ cfg, nowDate, batchSize, dryRun }) {
-    const params = auditEventRetentionParams(cfg, nowDate);
-    const deletion = deleteBatched(db, {
-      countSql: `
-        SELECT COUNT(*) AS count
-        FROM audit_events
-        WHERE ts < @cutoff
-           OR rowid IN (
-             SELECT rowid
-             FROM (
-               SELECT
-                 rowid,
-                 ROW_NUMBER() OVER (
-                   PARTITION BY agent_id
-                   ORDER BY ts DESC, rowid DESC
-                 ) AS retained_rank
-               FROM audit_events
-               WHERE ts >= @cutoff AND ts < @preserveFrom
-             )
-             WHERE retained_rank > @maxPerAgent
-           )
-      `,
-      deleteSql: `
-        DELETE FROM audit_events
-        WHERE rowid IN (
-          SELECT rowid
-          FROM audit_events
-          WHERE ts < @cutoff
-             OR rowid IN (
-               SELECT rowid
-               FROM (
-                 SELECT
-                   rowid,
-                   ROW_NUMBER() OVER (
-                     PARTITION BY agent_id
-                     ORDER BY ts DESC, rowid DESC
-                   ) AS retained_rank
-                 FROM audit_events
-                 WHERE ts >= @cutoff AND ts < @preserveFrom
-               )
-               WHERE retained_rank > @maxPerAgent
-             )
-          ORDER BY ts ASC, rowid ASC
-          LIMIT @limit
-        )
-      `,
-      params: {
-        cutoff: params.cutoff,
-        preserveFrom: params.preserveFrom,
-        maxPerAgent: params.maxPerAgent,
-      },
-      batchSize,
-      dryRun,
-    });
-    return { ...params, deletion };
+  function countFailedTracesPendingCleanup() {
+    const params = auditEventRetentionParams(retentionConfig(config), now());
+    return countRows(db, `${survivingAuditEventsCte()}
+      SELECT COUNT(*) AS count FROM audit_traces t
+      JOIN expired_traces x ON x.agent_id = t.agent_id AND x.trace_id = t.trace_id
+      WHERE t.review_error = 1 AND t.review_retry_count >= @maxRetries`, params);
   }
 
   function pruneAuditData({ cfg, nowDate, batchSize, dryRun }) {
-    const auditEvents = deleteAuditEvents({ cfg, nowDate, batchSize, dryRun });
-    const dashboardParams = {
-      auditCutoff: auditEvents.cutoff,
-      preserveFrom: auditEvents.preserveFrom,
-      maxPerAgent: auditEvents.maxPerAgent,
-      batchSize,
-      dryRun,
-    };
-    const findingOccurrences = deleteExpiredFindingOccurrences(db, dashboardParams);
-    const findings = deleteExpiredFindings(db, dashboardParams);
-    const reviewRuns = deleteExpiredReviewRuns(db, dashboardParams);
-    return {
-      cutoff: auditEvents.cutoff,
-      preserveFrom: auditEvents.preserveFrom,
-      maxPerAgent: auditEvents.maxPerAgent,
-      deletions: {
-        auditEvents: auditEvents.deletion,
-        findingOccurrences,
-        findings,
-        reviewRuns,
-      },
-    };
+    const params = auditEventRetentionParams(cfg, nowDate);
+    const options = { ...params, batchSize, dryRun };
+    // One transaction preserves the selection until evidence and its parent traces
+    // have both been deleted; rollback never leaves partially pruned tasks.
+    return db.transaction(() => {
+      const findingOccurrences = deleteExpiredFindingOccurrences(db, options);
+      const findings = deleteExpiredFindings(db, options);
+      const reviewRuns = deleteExpiredReviewRuns(db, options);
+      const traceChildren = {};
+      for (const [key, table] of [['traceReviews', 'audit_trace_reviews'], ['traceNotifications', 'audit_trace_notifications']]) {
+        traceChildren[key] = deleteBatched(db, {
+          countSql: `${survivingAuditEventsCte()} SELECT COUNT(*) AS count FROM ${table} WHERE (agent_id, trace_id) IN (SELECT agent_id, trace_id FROM expired_traces)`,
+          deleteSql: `${survivingAuditEventsCte()} DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} WHERE (agent_id, trace_id) IN (SELECT agent_id, trace_id FROM expired_traces) LIMIT @limit)`,
+          params, batchSize, dryRun,
+        });
+      }
+      if (!dryRun) {
+        // Mixed legacy findings can reference several traces. Remove only deleted
+        // IDs and their snapshots, preserving evidence of the surviving tasks.
+        for (const table of ['audit_review_findings', 'audit_review_finding_occurrences']) {
+          db.prepare(`${survivingAuditEventsCte()} UPDATE ${table} SET
+            evidence_event_ids_json = (SELECT json_group_array(value) FROM json_each(${safeEvidenceArraySql('evidence_event_ids_json')}) WHERE CAST(value AS INTEGER) NOT IN (SELECT id FROM expired_events)),
+            evidence_json = CASE WHEN json_valid(evidence_json) AND json_type(evidence_json) = 'array'
+              THEN (SELECT json_group_array(json(value)) FROM json_each(evidence_json) WHERE COALESCE(json_extract(value, '$.event_id'), json_extract(value, '$.id'), -1) NOT IN (SELECT id FROM expired_events))
+              ELSE evidence_json END
+            WHERE EXISTS (SELECT 1 FROM json_each(${safeEvidenceArraySql('evidence_event_ids_json')}) WHERE CAST(value AS INTEGER) IN (SELECT id FROM expired_events))`).run(params);
+        }
+      }
+      const auditEvents = deleteBatched(db, {
+        countSql: `${survivingAuditEventsCte()} SELECT COUNT(*) AS count FROM expired_events`,
+        deleteSql: `${survivingAuditEventsCte()} DELETE FROM audit_events WHERE id IN (SELECT id FROM expired_events LIMIT @limit)`,
+        params, batchSize, dryRun,
+      });
+      const auditTraces = deleteBatched(db, {
+        countSql: `${survivingAuditEventsCte()} SELECT COUNT(*) AS count FROM expired_traces`,
+        deleteSql: `${survivingAuditEventsCte()} DELETE FROM audit_traces WHERE (agent_id, trace_id) IN (SELECT agent_id, trace_id FROM expired_traces LIMIT @limit)`,
+        params, batchSize, dryRun,
+      });
+      return {
+        cutoff: params.auditCutoff,
+        highRiskCutoff: params.highRiskCutoff,
+        maxPerAgent: params.maxPerAgent,
+        deletions: { auditEvents, auditTraces, ...traceChildren, findingOccurrences, findings, reviewRuns },
+      };
+    })();
   }
 
   function pruneAuditEvents({ dryRun = false, batchSize = DEFAULT_BATCH_SIZE } = {}) {
@@ -669,7 +643,7 @@ export function createRetentionService({ db, config, cursorStore = null, now = (
     return {
       dryRun,
       cutoff: pruned.cutoff,
-      maxEventsPerAgent: pruned.maxPerAgent,
+      maxTracesPerAgent: pruned.maxPerAgent,
       deleted: Object.fromEntries(
         Object.entries(pruned.deletions).map(([key, value]) => [key, value.deleted]),
       ),
@@ -904,7 +878,7 @@ export function createRetentionService({ db, config, cursorStore = null, now = (
     return result;
   }
 
-  return { run, pruneAuditEvents };
+  return { run, pruneAuditEvents, countFailedTracesPendingCleanup };
 }
 
 function nextRunDelayMs(now, runAtHour) {
