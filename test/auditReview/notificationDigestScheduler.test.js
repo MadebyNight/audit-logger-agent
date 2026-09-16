@@ -7,6 +7,7 @@ import Database from 'better-sqlite3';
 import {
   createNotificationDigestScheduler,
   latestDailyReportSlotAt,
+  loadDailySummary,
   nextDailyReportAt,
 } from '../../src/auditReview/notificationDigestScheduler.js';
 
@@ -15,6 +16,12 @@ function makeDb(databasePath = ':memory:') {
   db.pragma('journal_mode = WAL');
   db.pragma('busy_timeout = 5000');
   db.exec(`
+    CREATE TABLE IF NOT EXISTS audit_traces (
+      agent_id TEXT NOT NULL, trace_id TEXT NOT NULL, last_event_at TEXT,
+      sealed_at TEXT, review_version INTEGER DEFAULT 0, trace_status TEXT DEFAULT 'pending',
+      risk_level TEXT DEFAULT 'unreviewed', original_request TEXT, risk_reason TEXT,
+      PRIMARY KEY(agent_id, trace_id)
+    );
     CREATE TABLE IF NOT EXISTS audit_events (
       id INTEGER PRIMARY KEY,
       ts TEXT NOT NULL,
@@ -57,6 +64,11 @@ function makeDb(databasePath = ':memory:') {
 }
 
 function insertSamples(db) {
+  db.exec(`INSERT INTO audit_traces
+    (agent_id, trace_id, last_event_at, sealed_at, review_version, trace_status, risk_level, original_request, risk_reason)
+    VALUES ('a1','t1','2026-07-17T01:10:00.000Z','2026-07-17T01:10:00.000Z',1,'failed','high','高风险写入','写入摘要'),
+      ('a1','t2','2026-07-17T01:20:00.000Z','2026-07-17T01:20:00.000Z',1,'success','none','正常任务',NULL),
+      ('a2','t1','2026-07-17T01:30:00.000Z','2026-07-17T01:30:00.000Z',2,'interrupted','high','部署风险','部署风险摘要')`);
   const insertEvent = db.prepare(`
     INSERT INTO audit_events (id, ts, agent_id, trace_id, tool_name, status)
     VALUES (@id, @ts, @agent_id, @trace_id, @tool_name, @status)
@@ -202,8 +214,8 @@ test('dry-run renders one global daily card across agents and traces without out
   assert.equal(group.agent_count, 2);
   assert.equal(group.trace_count, 3);
   assert.equal(group.high_risk_count, 2);
-  assert.equal(group.critical_count, 1);
-  assert.equal(group.highest_severity, 'critical');
+  assert.equal(group.critical_count, 0);
+  assert.equal(group.highest_severity, 'high');
   assert.equal(group.findings.length, 2);
   assert.deepEqual(group.tools.map((tool) => tool.tool_name), ['write', 'read', 'deploy']);
   assert.equal(payloads.length, 1);
@@ -893,4 +905,27 @@ test('health status exposes safe scheduling state and no next run when inactive'
   assert.equal(health.next_run_at_utc, '2026-07-17T02:00:00.000Z');
   assert.equal(health.next_run_at_local, '2026-07-17T10:00:00.000+08:00');
   db.close();
+});
+
+
+test('daily buckets use reviewed sealed Traces, never Finding occurrences or unreviewed risk', () => {
+  const db = makeDb();
+  try {
+    insertSamples(db);
+    const insert = db.prepare(`INSERT INTO audit_traces
+      (agent_id,trace_id,last_event_at,sealed_at,review_version,trace_status,risk_level)
+      VALUES ('a3',?,'2026-07-17T01:40:00.000Z',?,?,?,?)`);
+    insert.run('medium', 'sealed', 1, 'success', 'medium');
+    insert.run('low', 'sealed', 1, 'incomplete', 'low');
+    insert.run('backfill', 'sealed', 0, 'pending', 'unreviewed');
+    insert.run('reopened', null, 2, 'failed', 'high');
+    const summary = loadDailySummary(db, { from: '2026-07-16T16:00:00.000Z', to: '2026-07-17T02:00:00.000Z' });
+    assert.equal(summary.trace_count, 7);
+    assert.equal(summary.reviewed_trace_count, 5);
+    assert.equal(summary.event_count, 4);
+    assert.deepEqual(summary.trace_status_counts, { success: 2, failed: 1, interrupted: 1, incomplete: 1 });
+    assert.deepEqual(summary.risk_level_counts, { none: 1, low: 1, medium: 1, high: 2 });
+    assert.equal(summary.critical_count, 0);
+    assert.deepEqual(summary.top_risks.map(row => row.risk_level), ['high', 'high', 'medium']);
+  } finally { db.close(); }
 });

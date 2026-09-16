@@ -160,10 +160,6 @@ function loadDailySummary(db, { from, to }) {
       COUNT(*) AS event_count,
       SUM(CASE WHEN status <> 'OK' THEN 1 ELSE 0 END) AS error_count,
       COUNT(DISTINCT CASE WHEN agent_id IS NOT NULL AND agent_id <> '' THEN agent_id END) AS agent_count,
-      COUNT(DISTINCT CASE
-        WHEN agent_id IS NOT NULL AND agent_id <> '' AND trace_id IS NOT NULL AND trace_id <> ''
-        THEN agent_id || char(31) || trace_id
-      END) AS trace_count,
       COUNT(DISTINCT tool_name) AS tool_count,
       MIN(ts) AS first_event_at,
       MAX(ts) AS last_event_at
@@ -183,30 +179,34 @@ function loadDailySummary(db, { from, to }) {
     LIMIT 5
   `).all({ from, to });
 
-  const riskStats = db.prepare(`
-    SELECT
-      COUNT(*) AS high_risk_count,
-      SUM(CASE WHEN occurrences.severity = 'critical' THEN 1 ELSE 0 END) AS critical_count
-    FROM audit_review_finding_occurrences occurrences
-    WHERE occurrences.observed_at >= @from AND occurrences.observed_at <= @to
-      AND occurrences.severity IN ('high', 'critical')
+  // Match the Dashboard's task time axis; each composite Trace key counts once.
+  const traces = db.prepare(`
+    SELECT COUNT(*) AS trace_count,
+      SUM(CASE WHEN sealed_at IS NOT NULL AND review_version > 0 THEN 1 ELSE 0 END) AS reviewed_trace_count
+    FROM audit_traces WHERE last_event_at >= @from AND last_event_at <= @to
   `).get({ from, to });
-
-  const findings = db.prepare(`
-    SELECT
-      findings.agent_id,
-      findings.trace_id,
-      occurrences.severity,
-      occurrences.title,
-      occurrences.summary,
-      occurrences.observed_at
-    FROM audit_review_finding_occurrences occurrences
-    INNER JOIN audit_review_findings findings ON findings.finding_id = occurrences.finding_id
-    WHERE occurrences.observed_at >= @from AND occurrences.observed_at <= @to
-      AND occurrences.severity IN ('high', 'critical')
-    ORDER BY
-      CASE occurrences.severity WHEN 'critical' THEN 2 ELSE 1 END DESC,
-      occurrences.observed_at DESC
+  const buckets = db.prepare(`
+    SELECT trace_status, risk_level, COUNT(*) AS count
+    FROM audit_traces
+    WHERE last_event_at >= @from AND last_event_at <= @to
+      AND sealed_at IS NOT NULL AND review_version > 0
+    GROUP BY trace_status, risk_level
+  `).all({ from, to });
+  const traceStatusCounts = { success: 0, failed: 0, interrupted: 0, incomplete: 0 };
+  const riskLevelCounts = { none: 0, low: 0, medium: 0, high: 0 };
+  for (const row of buckets) {
+    if (Object.hasOwn(traceStatusCounts, row.trace_status)) traceStatusCounts[row.trace_status] += row.count;
+    if (Object.hasOwn(riskLevelCounts, row.risk_level)) riskLevelCounts[row.risk_level] += row.count;
+  }
+  const topRisks = db.prepare(`
+    SELECT agent_id, trace_id, risk_level, trace_status,
+      risk_level AS severity, original_request AS title, risk_reason AS summary,
+      last_event_at AS observed_at
+    FROM audit_traces
+    WHERE last_event_at >= @from AND last_event_at <= @to
+      AND sealed_at IS NOT NULL AND review_version > 0 AND risk_level IN ('low', 'medium', 'high')
+    ORDER BY CASE risk_level WHEN 'high' THEN 3 WHEN 'medium' THEN 2 ELSE 1 END DESC,
+      last_event_at DESC, agent_id, trace_id
     LIMIT 3
   `).all({ from, to });
 
@@ -215,14 +215,18 @@ function loadDailySummary(db, { from, to }) {
     event_count: Number(summary?.event_count) || 0,
     error_count: Number(summary?.error_count) || 0,
     agent_count: Number(summary?.agent_count) || 0,
-    trace_count: Number(summary?.trace_count) || 0,
+    trace_count: Number(traces?.trace_count) || 0,
     tool_count: Number(summary?.tool_count) || 0,
-    high_risk_count: Number(riskStats?.high_risk_count) || 0,
-    critical_count: Number(riskStats?.critical_count) || 0,
+    reviewed_trace_count: Number(traces?.reviewed_trace_count) || 0,
+    trace_status_counts: traceStatusCounts,
+    risk_level_counts: riskLevelCounts,
+    high_risk_count: riskLevelCounts.high,
+    critical_count: 0, // Deprecated compatibility field; never a Trace risk bucket.
     first_event_at: summary?.first_event_at ?? null,
     last_event_at: summary?.last_event_at ?? null,
     tools,
-    findings,
+    top_risks: topRisks,
+    findings: topRisks, // Legacy daily-summary consumers.
   };
 }
 
@@ -458,7 +462,7 @@ export function createNotificationDigestScheduler({
     const summary = loadDailySummary(db, window);
     const group = {
       ...summary,
-      highest_severity: summary.critical_count > 0 ? 'critical' : summary.high_risk_count > 0 ? 'high' : 'none',
+      highest_severity: summary.risk_level_counts.high > 0 ? 'high' : summary.risk_level_counts.medium > 0 ? 'medium' : summary.risk_level_counts.low > 0 ? 'low' : 'none',
     };
     const payloads = buildDailyReportPayloads({
       date: window.date,

@@ -183,6 +183,8 @@ function truncateText(value, maxChars = 44) {
 }
 
 function severityLabelMarkdown(severity) {
+  if (severity === 'medium') return '［中风险］';
+  if (severity === 'low') return '［低风险］';
   return severity === 'critical'
     ? "<font color='orange'>［严重］</font>"
     : "<font color='yellow'>［高风险］</font>";
@@ -455,6 +457,43 @@ export function buildHighRiskAlertPayloads({
   return packEntries(entries, makePayload, byteLimit);
 }
 
+// V1.1 uses a single immutable task card. Legacy Finding rendering above is
+// retained for historical previews, but is not an enqueue path.
+export function buildTraceAlertPayload({ trace, agentName, dashboardUrl,
+  maxPayloadBytes = DEFAULT_MAX_PAYLOAD_BYTES } = {}) {
+  const limit = Math.min(normalizedLimit(maxPayloadBytes, DEFAULT_MAX_PAYLOAD_BYTES), DEFAULT_MAX_PAYLOAD_BYTES);
+  const fields = [
+    ['发起人', trace.requester_id], ['原始请求', trace.original_request],
+    ['预期目的', trace.expected_purpose], ['最终结果或失败原因', trace.agent_result],
+    ['风险原因', trace.risk_reason],
+  ];
+  const clip = (value, size) => {
+    const chars = Array.from(sanitizeFeishuText(value) || '未提供');
+    return chars.length > size ? chars.slice(0, size - 1).join('') + '…' : chars.join('');
+  };
+  const detailUrl = safeHttpUrl(dashboardUrl);
+  let fieldLimit = 600;
+  while (true) {
+    const payload = baseCard({
+      title: '高风险审计告警',
+      subtitle: `${clip(agentName || trace.agent_id, 60)} · ${clip(trace.trace_id, 60)}`,
+      template: 'orange', preview: '高风险审计告警：需要人工介入',
+      elements: [
+        { tag: 'markdown', content: '**任务结论**\n需要人工介入' },
+        ...fields.map(([label, value]) => ({ tag: 'markdown',
+          content: `**${label}**\n${clip(value, label === '风险原因' ? Math.min(200, fieldLimit) : fieldLimit)}` })),
+        ...(trace.review_input_sampled ? [{ tag: 'markdown',
+          content: '该 Trace 事件过多，审查结论基于采样证据' }] : []),
+        ...(detailUrl ? [{ tag: 'button', text: { tag: 'plain_text', content: '查看任务详情与证据' },
+          type: 'primary', width: 'default', behaviors: [{ type: 'open_url', default_url: detailUrl }] }] : []),
+      ],
+    });
+    if (utf8Bytes(payload) <= limit) return payload;
+    if (fieldLimit === 1) throw new Error('Feishu trace card exceeds configured payload byte limit');
+    fieldLimit = Math.max(1, Math.floor(fieldLimit / 2));
+  }
+}
+
 export function buildDailyReportPayloads({
   date,
   generatedAt,
@@ -466,24 +505,23 @@ export function buildDailyReportPayloads({
   foldThresholdChars: _foldThresholdChars = DEFAULT_FOLD_THRESHOLD_CHARS,
 } = {}) {
   if (!group) return [];
-  const findings = sortedFindings(group.findings);
+  const findings = group.top_risks ?? sortedFindings(group.findings).map((finding) => ({ ...finding, severity: 'high' }));
   const byteLimit = normalizedLimit(maxPayloadBytes, DEFAULT_MAX_PAYLOAD_BYTES);
-  const highRiskCount = Math.max(Number(group.high_risk_count) || 0, findings.length);
-  const criticalCount = Math.max(
-    Number(group.critical_count) || 0,
-    findings.filter((finding) => finding.severity === 'critical').length,
-  );
+  const highRiskCount = group.top_risks ? Number(group.high_risk_count) || 0 : Math.max(Number(group.high_risk_count) || 0, findings.length);
   const eventCount = Number(group.event_count) || 0;
   const errorCount = Number(group.error_count) || 0;
   const agentCount = Number(group.agent_count) || 0;
   const traceCount = Number(group.trace_count) || 0;
   const toolCount = Number(group.tool_count) || 0;
   const topFindings = findings.slice(0, 3);
+  const riskCount = group.risk_level_counts ? group.risk_level_counts.low + group.risk_level_counts.medium + group.risk_level_counts.high : highRiskCount;
   const topTools = toolEntries(group.tools).slice(0, 5);
-  const conclusion = criticalCount > 0
-    ? `存在 ${highRiskCount} 条高风险，其中 ${criticalCount} 条严重，需要查看影响范围。`
-    : highRiskCount > 0
+  const conclusion = highRiskCount > 0
       ? `存在 ${highRiskCount} 条高风险，建议关注相关业务链路。`
+      : group.risk_level_counts && riskCount > 0
+        ? `存在 ${group.risk_level_counts.medium} 条中风险、${group.risk_level_counts.low} 条低风险 Trace，请查看审计结论。`
+      : group.reviewed_trace_count !== undefined && traceCount > Number(group.reviewed_trace_count)
+        ? `当前 ${traceCount} 条 Trace 中有 ${traceCount - Number(group.reviewed_trace_count)} 条尚未形成收敛结论。`
       : errorCount > 0
         ? `存在 ${errorCount} 条异常事件，暂未形成高风险发现，建议查看详情。`
         : eventCount > 0
@@ -499,9 +537,14 @@ export function buildDailyReportPayloads({
     metricElement([
       { label: '事件数', value: String(eventCount) },
       { label: '异常事件数', value: String(errorCount) },
-      { label: '高风险发现数', value: String(highRiskCount) },
-      { label: '严重风险数', value: String(criticalCount) },
+      { label: '高风险 Trace 数', value: String(highRiskCount) },
     ]),
+    metricElement(['success', 'failed', 'interrupted', 'incomplete'].map((key, index) => ({
+      label: ['成功', '失败', '中断', '不完整'][index], value: String(group.trace_status_counts?.[key] ?? 0),
+    }))),
+    metricElement(['none', 'low', 'medium', 'high'].map((key, index) => ({
+      label: ['无风险', '低风险', '中风险', '高风险'][index], value: String(group.risk_level_counts?.[key] ?? 0),
+    }))),
     {
       tag: 'markdown',
       content: `**覆盖范围**\n覆盖 ${agentCount} 个 Agent · ${traceCount} 条 Trace · ${toolCount} 类工具`,
@@ -509,7 +552,7 @@ export function buildDailyReportPayloads({
     ...(topFindings.length > 0 ? [{
       tag: 'markdown',
       content: [
-        `**Top 风险（展示 ${topFindings.length}/${highRiskCount}）**`,
+        `**Top 风险（展示 ${topFindings.length}/${riskCount}）**`,
         ...topFindings.map((finding, index) => {
           const title = sanitizeBusinessText(
             finding.title || finding.tool_name || finding.category || '未命名风险',

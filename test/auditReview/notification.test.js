@@ -1,4 +1,12 @@
 import test from 'node:test';
+import Database from 'better-sqlite3';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { openDb } from '../../scripts/lib/db.js';
+import { ensureReviewSchema } from '../../src/db/reviewSchema.js';
+import { ensureRuntimeSchema } from '../../src/db/runtimeSchema.js';
+import { createOutboxStore } from '../../src/agent/outboxStore.js';
 import assert from 'node:assert/strict';
 import { createReviewNotifier, meetsMinSeverity } from '../../src/auditReview/notification.js';
 
@@ -208,204 +216,16 @@ test('notification enabled=false prevents review and finding delivery from enter
   assert.equal(outbox.calls.length, 0);
 });
 
-test('enqueueFinding enqueues high/critical findings individually', () => {
+test('callback Findings cannot decide instantaneous alerts at any severity', () => {
   const outbox = makeFakeOutboxStore();
-  const notifier = createReviewNotifier({
-    outboxStore: outbox,
-    config: { auditReview: { notification: { callbackUrl: 'http://x', minSeverity: 'medium' } } },
-  });
-  const finding = {
-    finding_id: 'f1',
-    severity: 'high',
-    category: 'failed_call',
-    title: 'Failed call',
-    summary: 'Failed 5 times.',
-    recommendation: 'Check service.',
-    agent_id: 'mt-agent',
-    tool_name: 't',
-    trace_id: 'tr',
-    entity: { type: 'product', id: 'p' },
-    evidence: [
-      {
-        event_id: 1,
-        agent_id: 'mt-agent',
-        agent_name: 'MT Audit Agent',
-        tool_name: 't',
-        trace_id: 'tr',
-        span_id: 's1',
-        log_detail: {
-          ts: '2026-07-03T10:00:00.000Z',
-          event: 'tool.end',
-          status: 'INTERNAL',
-          duration_ms: 100,
-          entity: { type: 'product', id: 'p' },
-          result_summary: 'failed',
-          error_message: 'down',
-          reason: 'repeated',
-        },
-      },
-    ],
-  };
-  const result = notifier.enqueueFinding({
-    finding,
-    reviewId: 'r1',
-    run: { window_from: 'a', window_to: 'b' },
-    dashboardUrl: 'http://x/dash/r1',
-  });
-  assert.equal(result.enqueued, true);
-  assert.equal(outbox.calls.length, 1);
-  assert.equal(outbox.calls[0].type, 'audit_review_finding');
-  const payload = outbox.calls[0].payload;
-  assert.equal(payload.finding_id, 'f1');
-  assert.equal(payload.severity, 'high');
-  assert.equal(payload.agent_name, 'MT Audit Agent');
-  assert.deepEqual(payload.entity, { type: 'product', id: 'p' });
-  assert.ok(Array.isArray(payload.evidence));
-  assert.ok(payload.evidence.length > 0);
-});
-
-test('enqueueFinding skips medium findings', () => {
-  const outbox = makeFakeOutboxStore();
-  const notifier = createReviewNotifier({
-    outboxStore: outbox,
-    config: { auditReview: { notification: { callbackUrl: 'http://x' } } },
-  });
-  const result = notifier.enqueueFinding({
-    finding: { finding_id: 'fm', severity: 'medium', category: 'x', title: 't', summary: 's' },
-    reviewId: 'r1',
-    run: {},
-    dashboardUrl: 'http://x',
-  });
-  assert.equal(result.enqueued, false);
-  assert.equal(result.reason, 'below_high');
-});
-
-test('feishu notifier groups high/critical findings by agent and trace without storing a webhook URL', () => {
-  const outbox = makeFakeOutboxStore();
-  const notifier = createReviewNotifier({
-    outboxStore: outbox,
-    feishuMode: 'live',
-    config: {
-      auditReview: {
-        notification: {
-          enabled: true,
-          mode: 'feishu_bot',
-          minSeverity: 'high',
-          card: { foldThresholdChars: 1 },
-        },
-      },
-    },
-  });
-  const findings = [
-    { finding_id: 'f1', severity: 'high', agent_id: 'a1', trace_id: 't1', title: '风险 1', summary: '摘要 1' },
-    { finding_id: 'f2', severity: 'critical', agent_id: 'a1', trace_id: 't1', title: '风险 2', summary: '摘要 2' },
-    { finding_id: 'f3', severity: 'high', agent_id: 'a1', trace_id: 't2', title: '风险 3', summary: '摘要 3' },
-    { finding_id: 'f4', severity: 'medium', agent_id: 'a1', trace_id: 't1', title: '不发送', summary: '不发送' },
-  ];
-
-  const result = notifier.enqueueHighRiskGroups({
-    findings,
-    reviewId: 'review-feishu',
-    run: makeRun(),
-    dashboardUrl: 'https://example.com/dashboard',
-  });
-
-  assert.equal(result.enqueued, true);
-  assert.equal(result.groups.length, 2);
-  assert.equal(outbox.calls.length, 2);
-  assert.ok(outbox.calls.every((call) => call.deliveryMode === 'feishu_bot'));
-  assert.ok(outbox.calls.every((call) => call.callbackUrl === null));
-  const first = JSON.stringify(outbox.calls[0].payload);
-  assert.match(first, /风险 1/);
-  assert.match(first, /风险 2/);
-  assert.doesNotMatch(first, /风险 3|不发送/);
-});
-
-test('feishu dry-run renders grouped cards but never writes to outbox', () => {
-  const outbox = makeFakeOutboxStore();
-  const notifier = createReviewNotifier({
-    outboxStore: outbox,
-    feishuMode: 'dry-run',
-    config: {
-      agents: { a: { displayName: '审计 Agent A' } },
-      auditReview: { notification: { enabled: true, mode: 'feishu_bot' } },
-    },
-  });
-  const result = notifier.enqueueHighRiskGroups({
-    findings: [{
-      severity: 'high',
-      agent_id: 'a',
-      trace_id: 't',
-      title: '风险',
-      summary: '摘要',
-      observed_at: '2026-07-17T01:15:00.000Z',
-    }],
-    reviewId: 'r',
-    run: makeRun(),
-  });
-
-  assert.equal(result.reason, 'dry_run');
-  assert.equal(result.groups.length, 1);
-  assert.equal(result.groups[0].agentName, '审计 Agent A');
-  assert.equal(result.groups[0].agentId, 'a');
-  assert.equal(result.groups[0].findings[0].observed_at, '2026-07-17T01:15:00.000Z');
-  assert.match(JSON.stringify(result.groups[0].payloads), /审计 Agent A/);
-  assert.equal(outbox.calls.length, 0);
-});
-
-test('Feishu display names do not change raw identity dedupe keys', () => {
-  function renderWithDisplayName(displayName) {
-    const outbox = makeFakeOutboxStore();
-    const notifier = createReviewNotifier({
-      outboxStore: outbox,
-      feishuMode: 'live',
-      config: {
-        agents: { a: { displayName } },
-        auditReview: { notification: { enabled: true, mode: 'feishu_bot' } },
-      },
-    });
-    notifier.enqueueHighRiskGroups({
-      findings: [{ severity: 'high', agent_id: 'a', trace_id: 't', title: '风险', summary: '摘要' }],
-      reviewId: 'review-display-name',
-      run: makeRun(),
-    });
-    return outbox.calls[0].dedupeKey;
+  const notifier = createReviewNotifier({ outboxStore: outbox,
+    config: { auditReview: { notification: { mode: 'callback', callbackUrl: 'http://x' } } } });
+  for (const severity of ['low', 'medium', 'high', 'critical']) {
+    const finding = { severity, agent_id: 'a', trace_id: 't' };
+    assert.equal(notifier.enqueueFinding({ finding }).reason, 'trace_conclusion_required');
+    assert.equal(notifier.enqueueHighRiskGroups({ findings: [finding] }).enqueued, false);
   }
-
-  assert.equal(renderWithDisplayName('显示名称一'), renderWithDisplayName('显示名称二'));
-});
-
-test('feishu notifier keeps the same persisted risk deduplicated across review batches', () => {
-  const outbox = makeFakeOutboxStore();
-  const notifier = createReviewNotifier({
-    outboxStore: outbox,
-    feishuMode: 'live',
-    config: { auditReview: { notification: { enabled: true, mode: 'feishu_bot' } } },
-  });
-
-  notifier.enqueueHighRiskGroups({
-    findings: [{ finding_hash: 'risk-one', severity: 'high', agent_id: 'a', trace_id: 't', title: '批次一风险', summary: '批次一摘要' }],
-    reviewId: 'review-one',
-    run: makeRun(),
-  });
-  notifier.enqueueHighRiskGroups({
-    findings: [{ finding_hash: 'risk-one', severity: 'high', agent_id: 'a', trace_id: 't', title: '批次二风险', summary: '批次二摘要' }],
-    reviewId: 'review-two',
-    run: makeRun(),
-  });
-  notifier.enqueueHighRiskGroups({
-    findings: [{ finding_hash: 'risk-two', severity: 'high', agent_id: 'a', trace_id: 't', title: '另一条风险', summary: '另一条摘要' }],
-    reviewId: 'review-three',
-    run: makeRun(),
-  });
-
-  assert.equal(outbox.calls.length, 3);
-  assert.equal(outbox.calls[0].dedupeKey, outbox.calls[1].dedupeKey);
-  assert.notEqual(outbox.calls[0].dedupeKey, outbox.calls[2].dedupeKey);
-  assert.match(JSON.stringify(outbox.calls[0].payload), /批次一风险/);
-  assert.doesNotMatch(JSON.stringify(outbox.calls[0].payload), /批次二风险/);
-  assert.match(JSON.stringify(outbox.calls[1].payload), /批次二风险/);
-  assert.doesNotMatch(JSON.stringify(outbox.calls[1].payload), /批次一风险/);
+  assert.equal(outbox.calls.length, 0);
 });
 
 test('meetsMinSeverity compares by index', () => {
@@ -414,4 +234,148 @@ test('meetsMinSeverity compares by index', () => {
   assert.equal(meetsMinSeverity('medium', 'high'), false);
   assert.equal(meetsMinSeverity('low', 'medium'), false);
   assert.equal(meetsMinSeverity('critical', 'critical'), true);
+});
+
+
+function trace(overrides = {}) {
+  return { agent_id: 'a', trace_id: 't', sealed_at: '2026-09-16T01:00:00Z',
+    review_version: 1, risk_level: 'high', trace_status: 'failed', requester_id: 'user',
+    original_request: '生成报告', agent_result: '数据库不可用', risk_reason: '任务失败', ...overrides };
+}
+
+function traceNotifier(db, options = {}) {
+  return createReviewNotifier({ db, outboxStore: createOutboxStore(db), feishuMode: 'live',
+    config: { auditReview: { notification: { enabled: true, mode: 'feishu_bot' } } }, ...options });
+}
+function notificationDb(filename = ':memory:') {
+  const db = new Database(filename);
+  ensureRuntimeSchema(db);
+  db.exec(`CREATE TABLE audit_trace_notifications (agent_id TEXT NOT NULL, trace_id TEXT NOT NULL,
+    enqueued_at TEXT NOT NULL, PRIMARY KEY(agent_id,trace_id))`);
+  return db;
+}
+
+test('Trace conclusion reaches real outbox once, including late upgrade and recreated notifier', () => {
+  const db = notificationDb();
+  try {
+    const notifier = traceNotifier(db);
+    assert.equal(notifier.enqueueTrace({ trace: trace({ risk_level: 'low' }) }).enqueued, false);
+    const first = notifier.enqueueTrace({ trace: trace({ review_version: 2 }), dashboardUrl: 'https://audit.example/dashboard/agents/a/traces/t' });
+    assert.equal(first.enqueued, true);
+    const again = traceNotifier(db).enqueueTrace({ trace: trace({ review_version: 3, risk_reason: '新增证据' }) });
+    assert.equal(again.enqueued, false);
+    const rows = db.prepare('SELECT * FROM agent_outbox_events').all();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].callback_url, null);
+    assert.match(rows[0].dedupe_key, /^feishu_trace_alert:[a-f0-9]{24}$/);
+    assert.match(rows[0].payload_json, /数据库不可用/);
+    assert.doesNotMatch(rows[0].payload_json, /新增证据/);
+  } finally { db.close(); }
+});
+
+test('persistent receipt prevents re-enqueue after delivered outbox rows are pruned', () => {
+  const db = notificationDb();
+  try {
+    traceNotifier(db).enqueueTrace({ trace: trace() });
+    db.prepare("UPDATE agent_outbox_events SET delivery_status='delivered'").run();
+    db.prepare("DELETE FROM agent_outbox_events WHERE delivery_status='delivered'").run();
+    assert.equal(traceNotifier(db).enqueueTrace({ trace: trace({ review_version: 8 }) }).reason, 'duplicate');
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM agent_outbox_events').get().n, 0);
+  } finally { db.close(); }
+});
+
+test('failed outbox enqueue rolls back notification receipt and permits retry', () => {
+  const db = notificationDb();
+  try {
+    const notifier = traceNotifier(db, { outboxStore: { enqueue() { throw new Error('disk full'); } } });
+    assert.throws(() => notifier.enqueueTrace({ trace: trace() }), /disk full/);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM audit_trace_notifications').get().n, 0);
+    assert.equal(traceNotifier(db).enqueueTrace({ trace: trace() }).enqueued, true);
+  } finally { db.close(); }
+});
+
+test('composite keys avoid colon collisions and separate same Trace ID across agents', () => {
+  const db = notificationDb();
+  try {
+    const notifier = traceNotifier(db);
+    for (const [agent_id, trace_id] of [['a:b','c'], ['a','b:c'], ['a','same'], ['b','same']]) {
+      assert.equal(notifier.enqueueTrace({ trace: trace({ agent_id, trace_id }) }).enqueued, true);
+    }
+    assert.equal(db.prepare('SELECT COUNT(DISTINCT dedupe_key) AS n FROM agent_outbox_events').get().n, 4);
+  } finally { db.close(); }
+});
+
+test('non-high, unsealed, backfill, disabled and dry-run never persist a receipt', () => {
+  const db = notificationDb();
+  try {
+    for (const risk_level of ['unreviewed', 'none', 'low', 'medium', 'critical']) {
+      assert.equal(traceNotifier(db).enqueueTrace({ trace: trace({ risk_level }) }).enqueued, false);
+    }
+    for (const overrides of [{ sealed_at: null }, { review_version: 0 }, { agent_id: '' }]) {
+      assert.equal(traceNotifier(db).enqueueTrace({ trace: trace(overrides) }).enqueued, false);
+    }
+    for (const feishuMode of ['disabled', 'dry-run']) {
+      assert.equal(traceNotifier(db, { feishuMode }).enqueueTrace({ trace: trace() }).enqueued, false);
+    }
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM audit_trace_notifications').get().n, 0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM agent_outbox_events').get().n, 0);
+  } finally { db.close(); }
+});
+
+test('Finding severity cannot bypass Trace-only Feishu notifications', () => {
+  const db = notificationDb();
+  try {
+    const notifier = traceNotifier(db);
+    assert.equal(notifier.enqueueHighRiskGroups({ findings: makeReview().findings }).reason, 'trace_conclusion_required');
+    assert.equal(notifier.enqueueFinding({ finding: makeReview().findings[0] }).enqueued, false);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM agent_outbox_events').get().n, 0);
+  } finally { db.close(); }
+});
+
+
+test('independent SQLite connections and restart retain the Trace notification receipt', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-notification-'));
+  const filename = path.join(directory, 'audit.db');
+  let first;
+  let second;
+  let reopened;
+  try {
+    first = notificationDb(filename);
+    second = new Database(filename);
+    assert.equal(traceNotifier(first).enqueueTrace({ trace: trace() }).enqueued, true);
+    assert.equal(traceNotifier(second).enqueueTrace({ trace: trace() }).reason, 'duplicate');
+    first.close();
+    second.close();
+    reopened = new Database(filename);
+    reopened.prepare('DELETE FROM agent_outbox_events').run();
+    assert.equal(traceNotifier(reopened).enqueueTrace({ trace: trace({ review_version: 9 }) }).reason, 'duplicate');
+    assert.equal(reopened.prepare('SELECT COUNT(*) AS n FROM audit_trace_notifications').get().n, 1);
+  } finally {
+    for (const db of [first, second, reopened]) if (db?.open) db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('migration keeps old alert keys and historical critical evidence without re-alerting backfill', () => {
+  const db = openDb(':memory:');
+  try {
+    ensureRuntimeSchema(db);
+    db.prepare(`INSERT INTO audit_events (row_hash, span_id, agent_id, trace_id, ts, event, tool_name, status, raw_json)
+      VALUES ('legacy-hash', 'span', 'legacy-agent', 'legacy-trace', '2026-07-01T00:00:00Z', 'run.failed', 'run', 'INTERNAL', '{}')`).run();
+    const outbox = createOutboxStore(db);
+    outbox.enqueue({ runId: 'legacy-review', type: 'audit_review_high_risk_group',
+      deliveryMode: 'feishu_bot', callbackUrl: null, dedupeKey: 'feishu_alert_v2:legacy-hash',
+      payload: { historical_severity: 'critical' } });
+    const before = db.prepare('SELECT * FROM agent_outbox_events').get();
+    ensureReviewSchema(db);
+    ensureReviewSchema(db);
+    const historical = db.prepare('SELECT * FROM audit_traces').get();
+    assert.equal(historical.sealed_reason, 'backfill');
+    assert.equal(historical.review_version, 0);
+    assert.equal(historical.risk_level, 'unreviewed');
+    assert.equal(traceNotifier(db).enqueueTrace({ trace: historical }).reason, 'unreviewed');
+    assert.deepEqual(db.prepare('SELECT * FROM agent_outbox_events').get(), before);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM agent_outbox_events').get().n, 1);
+  } finally { db.close(); }
 });

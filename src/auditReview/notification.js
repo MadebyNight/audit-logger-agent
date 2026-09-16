@@ -5,7 +5,7 @@
 // mechanism to deliver them to whatever callback receiver is configured.
 
 import crypto from 'crypto';
-import { buildHighRiskAlertPayloads, groupHighRiskFindings } from './feishuCards.js';
+import { buildTraceAlertPayload } from './feishuCards.js';
 import { agentDisplayName } from './evidence.js';
 
 const SEVERITY_ORDER = ['low', 'medium', 'high', 'critical'];
@@ -103,42 +103,13 @@ function nonEmptyString(value) {
   return typeof value === 'string' && value.trim() !== '';
 }
 
-function highRiskFindingIdentity(finding) {
-  if (nonEmptyString(finding?.finding_hash)) return ['finding_hash', finding.finding_hash];
-  if (nonEmptyString(finding?.finding_id ?? finding?.id)) return ['finding_id', finding.finding_id ?? finding.id];
-  const entity = finding?.entity ?? {};
-  return [
-    'fallback',
-    finding?.category ?? null,
-    finding?.severity ?? null,
-    finding?.tool_name ?? null,
-    finding?.entity_type ?? entity.type ?? null,
-    finding?.entity_id ?? entity.id ?? null,
-    finding?.normalized_error_code ?? null,
-  ];
+export function highRiskGroupDedupeKey({ group }) {
+  return dedupeIdentity('feishu_trace_alert', [group.agentId, group.traceId]);
 }
 
-function highRiskGroupDedupeKey({ reviewId, group, payloadIndex }) {
-  const hasCompleteIdentity = nonEmptyString(group.agentId) && nonEmptyString(group.traceId);
-  const riskIdentities = group.findings
-    .map(highRiskFindingIdentity)
-    .map((identity) => JSON.stringify(identity))
-    .sort();
-  return dedupeIdentity('feishu_alert_v2', [
-    // Missing agent/trace identities are isolated by review to avoid dropping
-    // unrelated findings that lack a safe cross-review identity.
-    ...(hasCompleteIdentity ? [] : [reviewId]),
-    group.agentId ?? null,
-    group.traceId ?? null,
-    riskIdentities,
-    payloadIndex,
-  ]);
-}
-
-export function createReviewNotifier({ outboxStore, config, feishuMode = 'disabled' }) {
+export function createReviewNotifier({ db, outboxStore, config, feishuMode = 'disabled' }) {
   const notifyConfig = defaultNotificationConfig(config);
   const notificationsEnabled = notifyConfig.enabled !== false;
-  const minSeverity = notifyConfig.minSeverity ?? 'medium';
   const sendEmptyReview = notifyConfig.sendEmptyReview ?? false;
   const callbackUrl = notifyConfig.callbackUrl;
   const deliveryMode = notifyConfig.mode ?? 'callback';
@@ -172,98 +143,60 @@ export function createReviewNotifier({ outboxStore, config, feishuMode = 'disabl
     return { enqueued: true, payload };
   }
 
-  function enqueueFinding({ finding, reviewId, run, dashboardUrl }) {
-    if (!notificationsEnabled) {
-      return { enqueued: false, reason: 'disabled' };
-    }
-    const sev = finding.severity;
-    if (!meetsMinSeverity(sev, 'high')) {
-      return { enqueued: false, reason: 'below_high' };
-    }
-    if (deliveryMode === 'feishu_bot') {
-      return enqueueHighRiskGroups({ findings: [finding], reviewId, run, dashboardUrl });
-    }
-    const payload = buildFindingPayload({ finding, reviewId, run, dashboardUrl });
-    outboxStore.enqueue({
-      runId: reviewId,
-      type: 'audit_review_finding',
-      payload,
-      deliveryMode,
-      callbackUrl,
-      maxAttempts,
-    });
-    return { enqueued: true, payload };
+  function enqueueFinding() {
+    return { enqueued: false, reason: notificationsEnabled ? 'trace_conclusion_required' : 'disabled' };
   }
 
-  function enqueueHighRiskGroups({ findings, reviewId, run, dashboardUrl }) {
-    if (!notificationsEnabled) {
-      return { enqueued: false, reason: 'disabled', groups: [] };
-    }
-    const groups = groupHighRiskFindings(findings);
-    if (groups.length === 0) {
-      return { enqueued: false, reason: 'below_high', groups: [] };
-    }
-    if (deliveryMode !== 'feishu_bot') {
-      const results = groups.flatMap((group) => group.findings.map((finding) =>
-        enqueueFinding({ finding, reviewId, run, dashboardUrl })));
-      return {
-        enqueued: results.some((result) => result.enqueued),
-        groups,
-        results,
-      };
-    }
-    if (feishuMode === 'disabled') {
-      return { enqueued: false, reason: 'disabled', groups: [] };
-    }
+  function enqueueHighRiskGroups() {
+    return { ...enqueueFinding(), groups: [] };
+  }
 
-    const rendered = groups.map((group) => {
-      const agentName = agentDisplayName(group.agentId, agentsConfig);
-      return {
-        ...group,
-        agentName,
-        payloads: buildHighRiskAlertPayloads({
-          reviewId,
-          window: { from: run?.window_from, to: run?.window_to },
-          agentId: group.agentId,
-          agentName,
-          traceId: group.traceId,
-          findings: group.findings,
-          dashboardUrl,
-          maxPayloadBytes: cardConfig.maxPayloadBytes,
-          foldThresholdChars: cardConfig.foldThresholdChars,
-        }),
-      };
+  function enqueueTrace({ trace, dashboardUrl }) {
+    if (!notificationsEnabled || deliveryMode !== 'feishu_bot' || feishuMode === 'disabled') {
+      return { enqueued: false, reason: 'disabled' };
+    }
+    if (!trace?.sealed_at || !(trace.review_version > 0)) {
+      return { enqueued: false, reason: 'unreviewed' };
+    }
+    if (trace.risk_level !== 'high') return { enqueued: false, reason: 'below_high' };
+    if (!nonEmptyString(trace.agent_id) || !nonEmptyString(trace.trace_id)) {
+      return { enqueued: false, reason: 'missing_identity' };
+    }
+    const payload = buildTraceAlertPayload({
+      trace,
+      agentName: agentDisplayName(trace.agent_id, agentsConfig),
+      dashboardUrl,
+      maxPayloadBytes: cardConfig.maxPayloadBytes,
     });
-    if (feishuMode === 'dry-run') {
-      return { enqueued: false, reason: 'dry_run', groups: rendered };
-    }
-
-    let enqueuedCount = 0;
-    for (const group of rendered) {
-      group.payloads.forEach((payload, index) => {
-        const result = outboxStore.enqueue({
-          runId: reviewId,
-          type: 'audit_review_high_risk_group',
-          payload,
-          deliveryMode: 'feishu_bot',
-          callbackUrl: null,
-          maxAttempts,
-          dedupeKey: highRiskGroupDedupeKey({ reviewId, group, payloadIndex: index }),
-        });
-        if (result?.enqueued !== false) enqueuedCount += 1;
+    if (feishuMode === 'dry-run') return { enqueued: false, reason: 'dry_run', payload };
+    if (!db) throw new Error('enqueueTrace requires the outbox SQLite connection');
+    const dedupeKey = highRiskGroupDedupeKey({ group: { agentId: trace.agent_id, traceId: trace.trace_id } });
+    // The receipt outlives outbox retention. A failed enqueue rolls it back,
+    // while retries/dead letters continue to use the original outbox record.
+    return db.transaction(() => {
+      const receipt = db.prepare(`
+        INSERT OR IGNORE INTO audit_trace_notifications (agent_id, trace_id, enqueued_at)
+        VALUES (?, ?, ?)
+      `).run(trace.agent_id, trace.trace_id, new Date().toISOString());
+      if (!receipt.changes) return { enqueued: false, reason: 'duplicate' };
+      const result = outboxStore.enqueue({
+        runId: dedupeKey,
+        type: 'audit_trace_high_risk',
+        payload,
+        deliveryMode: 'feishu_bot',
+        callbackUrl: null,
+        maxAttempts,
+        dedupeKey,
       });
-    }
-    return {
-      enqueued: enqueuedCount > 0,
-      enqueuedCount,
-      groups: rendered,
-    };
+      return { ...result, enqueued: result?.enqueued !== false, payload };
+    }).immediate();
   }
 
   return {
     enqueue,
     enqueueFinding,
     enqueueHighRiskGroups,
+    enqueueTrace,
     buildSummaryPayload,
     buildFindingPayload,
     meetsMinSeverity,
