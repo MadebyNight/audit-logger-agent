@@ -13,23 +13,13 @@
 import crypto from 'crypto';
 import { createTraceStore } from './traceStore.js';
 import { createTraceAggregator } from './traceAggregator.js';
-import { agentDisplayName, buildEvidenceDetail, buildEvidenceIndex, evidenceForEventIds } from './evidence.js';
-import { estimateTokensForPayload, llmBudgetFromConfig, usageWouldExceedBudget } from './llmBudget.js';
+import { agentDisplayName, buildEvidenceDetail } from './evidence.js';
 
 const LOCK_NAME = 'audit_review_scheduler';
 const LEASE_MINUTES = 10;
 
 function nowIso() {
   return new Date().toISOString();
-}
-
-function estimateTokensForReview({ reviewId, window, candidates }) {
-  return estimateTokensForPayload({ review_id: reviewId, window, candidates: candidates ?? [] });
-}
-
-function positiveInteger(value, fallback) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
 function reviewIdFor(now) {
@@ -50,69 +40,10 @@ function entityIdOf(value) {
 function maxSeverity(...severities) {
   return severities
     .filter(Boolean)
+    .map((severity) => severity === 'critical' ? 'high' : severity)
     .reduce((max, severity) =>
       (SEVERITY_RANK[severity] ?? 0) > (SEVERITY_RANK[max] ?? 0) ? severity : max,
     'low');
-}
-
-function filterEvidenceEventIds(eventIds, evidenceIndex) {
-  const seen = new Set();
-  const filtered = [];
-  for (const id of Array.isArray(eventIds) ? eventIds : []) {
-    if (!Number.isInteger(id) || !evidenceIndex.has(id) || seen.has(id)) continue;
-    seen.add(id);
-    filtered.push(id);
-  }
-  return filtered;
-}
-
-function buildCandidatesByEventId(candidates) {
-  const byEventId = new Map();
-  for (const candidate of candidates) {
-    const bucket = byEventId.get(candidate.event_id) ?? [];
-    bucket.push(candidate);
-    byEventId.set(candidate.event_id, bucket);
-  }
-  return byEventId;
-}
-
-function ruleCandidateKey(candidate) {
-  return [
-    candidate.event_id,
-    candidate.category ?? '',
-    candidate.agent_id ?? '',
-    candidate.tool_name ?? '',
-    candidate.trace_id ?? '',
-    entityTypeOf(candidate) ?? '',
-    entityIdOf(candidate) ?? '',
-  ].join('|');
-}
-
-function ruleCandidatesForEvidenceIds(evidenceIds, candidatesByEventId) {
-  return evidenceIds
-    .flatMap((id) => candidatesByEventId.get(id) ?? [])
-    .filter((candidate) => candidate?.min_severity);
-}
-
-function ruleMinimumSeverityForCandidates(candidates) {
-  let floor = null;
-  for (const candidate of candidates) {
-    floor = maxSeverity(floor, candidate.min_severity);
-  }
-  return floor;
-}
-
-function sameNullable(a, b) {
-  return (a ?? null) === (b ?? null);
-}
-
-function findingMatchesCandidateIdentity(finding, candidate) {
-  return candidate.category === finding.category &&
-    sameNullable(candidate.agent_id, finding.agent_id) &&
-    sameNullable(candidate.tool_name, finding.tool_name) &&
-    sameNullable(candidate.trace_id, finding.trace_id) &&
-    sameNullable(entityTypeOf(candidate), entityTypeOf(finding)) &&
-    sameNullable(entityIdOf(candidate), entityIdOf(finding));
 }
 
 /**
@@ -160,43 +91,6 @@ function findingFromCandidate(candidate, reviewId, riskPolicyVersion, promptVers
     reviewer_version: reviewerVersion,
   };
 }
-/**
- * Build a degraded-mode review object from candidates, mirroring the LLM output contract
- * (design 6.7) just enough for the notifier to build a summary payload.
- */
-function degradedReview({ reviewId, window, candidates }) {
-  const severityCounts = { critical: 0, high: 0, medium: 0, low: 0 };
-  for (const c of candidates) {
-    const sev = maxSeverity('medium', c.min_severity);
-    severityCounts[sev] = (severityCounts[sev] || 0) + 1;
-  }
-  return {
-    type: 'audit_review',
-    review_id: reviewId,
-    window,
-    summary: {
-      title: 'LLM review unavailable; rule-based findings only',
-      overview: `LLM review unavailable; generated rule-based findings from ${candidates.length} candidate event(s).`,
-      severity_counts: severityCounts,
-    },
-    findings: candidates.map((c) => ({
-      category: c.category,
-      severity: maxSeverity('medium', c.min_severity),
-      agent_id: c.agent_id,
-      tool_name: c.tool_name,
-      trace_id: c.trace_id,
-      entity: entityTypeOf(c) || entityIdOf(c)
-        ? { type: entityTypeOf(c), id: entityIdOf(c) }
-        : null,
-      title: c.reason ?? c.category,
-      summary: c.reason ?? c.category,
-      recommendation: '',
-      evidence_event_ids: [c.event_id],
-      requires_action: false,
-    })),
-  };
-}
-
 /**
  * Build findings from ingest parse errors (design 5.3).
  */
@@ -333,9 +227,7 @@ export function createAuditReviewScheduler({
   const riskPolicyVersion = auditConfig.riskPolicy?.version ?? 'risk-policy-v1';
   const promptVersion = auditConfig.llmReview?.promptVersion ?? 'audit-review-prompt-v1';
   const reviewerVersion = auditConfig.llmReview?.reviewerVersion ?? 'audit-reviewer-v1';
-  const maxCandidatesPerLlmReview = positiveInteger(auditConfig.llmReview?.maxCandidatesPerCall, 12);
   const llmModel = llmModelOpt ?? config.planner?.model ?? config.auditReview?.llmReview?.model ?? null;
-  const llmBudget = llmBudgetFromConfig(config);
 
   let scheduledTimer = null;
   let refreshTimer = null;
@@ -515,7 +407,7 @@ export function createAuditReviewScheduler({
     let findingCount = 0;
     let ingestResult = { inserted: 0, scannedFiles: 0, parseErrors: [], cursorUpdates: 0 };
     let candidates = { candidates: [], totalEvents: 0, trimmed: false };
-    let llmResult = { ok: false, degraded: true, error: 'not_run' };
+    let traceResult;
 
     try {
       // 5. Ingest.
@@ -557,7 +449,11 @@ export function createAuditReviewScheduler({
 
       // 5a. Aggregate and review sealed traces.
       try {
-        const traceResult = await traceAggregator.run();
+        traceResult = await traceAggregator.run();
+        if (traceResult.reviews?.some((result) => result.error || result.reason === 'llm_budget_exceeded')) {
+          status = 'completed_degraded';
+          errorCode = 'trace_review_incomplete';
+        }
         logAudit(
           'review.trace_aggregation.completed',
           'OK',
@@ -571,6 +467,7 @@ export function createAuditReviewScheduler({
           `Trace aggregation failed: ${err.message}`,
           'audit.trace',
         );
+        throw err;
       }
 
       // 6. Detect candidates.
@@ -599,10 +496,6 @@ export function createAuditReviewScheduler({
         candidates = { candidates: [], totalEvents: 0, trimmed: false };
       }
 
-      // 6a. Build a structured evidence index keyed by event_id for LLM findings.
-      const evidenceIndex = buildEvidenceIndex(candidates.candidates, agentsConfig);
-      const candidatesByEventId = buildCandidatesByEventId(candidates.candidates);
-
       // 6b. Persist parse-error findings.
       const parseFindings = parseErrorFindings(
         ingestResult.parseErrors,
@@ -612,111 +505,12 @@ export function createAuditReviewScheduler({
         agentsConfig,
       );
 
-      // 7. LLM review.
-      const llmCandidates = candidates.candidates.slice(0, maxCandidatesPerLlmReview);
-      const llmDay = windowTo.slice(0, 10);
-      const estimatedTokens = estimateTokensForReview({
-        reviewId,
-        window: { from: windowFrom, to: windowTo },
-        candidates: llmCandidates,
-      });
-      const llmUsage = reviewStore.getLlmUsage?.(llmDay) ?? { day: llmDay, calls: 0, est_tokens: 0 };
-      if (usageWouldExceedBudget(llmUsage, llmBudget, estimatedTokens)) {
-        llmResult = { ok: false, degraded: true, error: 'llm_budget_exceeded' };
-        logAudit(
-          'review.llm.budget_exceeded',
-          'INTERNAL',
-          `Skipped LLM review: usage calls=${llmUsage.calls}/${llmBudget.maxCallsPerDay}, est_tokens=${llmUsage.est_tokens}/${llmBudget.maxTokensPerDay}, next_est_tokens=${estimatedTokens}.`,
-          'audit.llm',
-        );
-      } else {
-        try {
-          llmResult = await llmReviewer.review({
-            reviewId,
-            window: { from: windowFrom, to: windowTo },
-            candidates: llmCandidates,
-            reviewStore,
-          });
-          reviewStore.recordLlmUsage?.({ day: llmDay, calls: 1, estTokens: estimatedTokens });
-          logAudit(
-            'review.llm.completed',
-            llmResult.ok ? 'OK' : 'INTERNAL',
-            llmResult.ok
-              ? `LLM review ok, model=${llmModel}, prompt=${promptVersion}`
-              : `LLM review degraded: ${llmResult.error ?? 'unknown error'}`,
-            'audit.llm',
-          );
-        } catch (err) {
-          reviewStore.recordLlmUsage?.({ day: llmDay, calls: 1, estTokens: estimatedTokens });
-          llmResult = { ok: false, degraded: true, error: err.message };
-          logAudit(
-            'review.llm.completed',
-            'INTERNAL',
-            `LLM review threw: ${err.message}`,
-            'audit.llm',
-          );
-        }
-      }
-
-      if (!llmResult.ok) {
-        status = 'completed_degraded';
-        errorCode = llmResult.error === 'llm_budget_exceeded' ? 'llm_budget_exceeded' : 'llm_error';
-      }
+      // Trace is the sole LLM audit unit. Keep deterministic Finding evidence
+      // for compatibility, without a second window-level model invocation.
 
       // 8. Persist findings.
-      let findingsToPersist = [];
-      if (llmResult.ok && llmResult.review && Array.isArray(llmResult.review.findings)) {
-        const coveredRuleCandidateKeys = new Set();
-        findingsToPersist = llmResult.review.findings.flatMap((f) => {
-          const evidenceIds = filterEvidenceEventIds(f.evidence_event_ids, evidenceIndex);
-          const evidence = evidenceForEventIds(evidenceIds, evidenceIndex);
-          const ruleCandidates = ruleCandidatesForEvidenceIds(evidenceIds, candidatesByEventId);
-          const matchedRuleCandidates = ruleCandidates.filter((candidate) =>
-            findingMatchesCandidateIdentity(f, candidate));
-          const minSeverity = ruleMinimumSeverityForCandidates(matchedRuleCandidates);
-          for (const candidate of matchedRuleCandidates) {
-            coveredRuleCandidateKeys.add(ruleCandidateKey(candidate));
-          }
-          if (
-            f.category === 'high_risk_permission' &&
-            (evidenceIds.length === 0 || (ruleCandidates.length > 0 && matchedRuleCandidates.length === 0))
-          ) {
-            return [];
-          }
-          return [{
-            finding_id: `finding_${crypto.randomUUID()}`,
-            review_id: reviewId,
-            category: f.category,
-            severity: maxSeverity(f.severity, minSeverity),
-            agent_id: f.agent_id,
-            tool_name: f.tool_name,
-            trace_id: f.trace_id,
-            entity: f.entity ?? null,
-            entity_type: f.entity?.type ?? null,
-            entity_id: f.entity?.id ?? null,
-            title: f.title,
-            summary: f.summary,
-            recommendation: f.recommendation,
-            requires_action: f.requires_action ? 1 : 0,
-            evidence_event_ids: evidenceIds,
-            evidence_event_ids_json: JSON.stringify(evidenceIds),
-            evidence_json: JSON.stringify(evidence),
-            normalized_error_code: null,
-            risk_policy_version: riskPolicyVersion,
-            prompt_version: promptVersion,
-            reviewer_version: reviewerVersion,
-          }];
-        });
-        const uncoveredRuleFindings = candidates.candidates
-          .filter((c) => c.min_severity && !coveredRuleCandidateKeys.has(ruleCandidateKey(c)))
-          .map((c) => findingFromCandidate(c, reviewId, riskPolicyVersion, promptVersion, reviewerVersion, agentsConfig));
-        findingsToPersist.push(...uncoveredRuleFindings);
-      } else {
-        // Degraded mode: convert each candidate to a basic finding.
-        findingsToPersist = candidates.candidates.map((c) =>
-          findingFromCandidate(c, reviewId, riskPolicyVersion, promptVersion, reviewerVersion, agentsConfig),
-        );
-      }
+      let findingsToPersist = candidates.candidates.map((candidate) =>
+        findingFromCandidate(candidate, reviewId, riskPolicyVersion, null, reviewerVersion, agentsConfig));
 
       findingsToPersist.push(...parseFindings);
       findingsToPersist = withRawJsonSnapshots(reviewStore, findingsToPersist);
@@ -733,74 +527,39 @@ export function createAuditReviewScheduler({
       });
       findingCount = persistedResult.findingCount;
 
-      // 9. Notify.
+      // Preserve legacy summary callbacks; the notifier suppresses summaries
+      // in Feishu mode. Findings never trigger individual immediate alerts.
       try {
-        const dashboardUrl = visualization.dashboardUrlFor(reviewId);
-        const run = reviewStore.getRun(reviewId);
-        // persistReviewResult returns every finding/occurrence pair committed
-        // for this batch. Using that authoritative result avoids arbitrary
-        // list limits and preserves re-observed findings whose first review_id
-        // belongs to an earlier batch.
-        const persistedEntries = Array.isArray(persistedResult.findings)
-          ? persistedResult.findings
-          : [];
-        const matchPersisted = (f) => persistedEntries.find(({ finding }) =>
-          finding?.category === f.category &&
-          (finding?.agent_id ?? null) === (f.agent_id ?? null) &&
-          (finding?.tool_name ?? null) === (f.tool_name ?? null) &&
-          (finding?.trace_id ?? null) === (f.trace_id ?? null) &&
-          (finding?.entity_type ?? null) === entityTypeOf(f) &&
-          (finding?.entity_id ?? null) === entityIdOf(f));
-        const baseReview = llmResult.ok
-          ? llmResult.review
-          : degradedReview({ reviewId, window: { from: windowFrom, to: windowTo }, candidates: candidates.candidates });
-        const reviewForNotify = {
-          ...baseReview,
-          findings: (baseReview.findings || []).map((f) => {
-            if (f.finding_id) return f;
-            const persisted = matchPersisted(f)?.finding;
-            return persisted ? { ...f, finding_id: persisted.finding_id } : f;
-          }),
-        };
-        notifier.enqueue({ reviewId, run, review: reviewForNotify, dashboardUrl });
+        const findings = (persistedResult.findings ?? []).map(({ finding }) => finding);
+        const severityCounts = { critical: 0, high: 0, medium: 0, low: 0 };
+        for (const finding of findings) {
+          const severity = finding.severity === 'critical' ? 'high' : finding.severity;
+          severityCounts[severity] = (severityCounts[severity] ?? 0) + 1;
+        }
+        notifier.enqueue({
+          reviewId,
+          run: reviewStore.getRun(reviewId),
+          review: { findings, summary: { severity_counts: severityCounts } },
+          dashboardUrl: visualization.dashboardUrlFor(reviewId),
+        });
+      } catch (err) {
+        logAudit('review.notification.enqueued', 'INTERNAL', `Summary callback enqueue failed: ${err.message}`, 'audit.notify');
+      }
 
-        // Enqueue high/critical findings. Feishu delivery groups them by the
-        // non-crossable (agent_id, trace_id) boundary; callback delivery keeps
-        // the legacy individual payload behavior.
-        const persistedFindings = persistedEntries
-          .map(({ finding, occurrence }) => {
-            if (!finding || !occurrence) return null;
-            return {
-              ...finding,
-              severity: occurrence.severity,
-              title: occurrence.title,
-              summary: occurrence.summary,
-              recommendation: occurrence.recommendation,
-              evidence: occurrence.evidence,
-              observed_at: occurrence.observed_at,
-            };
-          })
-          .filter((finding) => finding?.severity === 'high' || finding?.severity === 'critical');
-        if (typeof notifier.enqueueHighRiskGroups === 'function') {
-          notifier.enqueueHighRiskGroups({ findings: persistedFindings, reviewId, run, dashboardUrl });
-        } else {
-          for (const pf of persistedFindings) {
-            notifier.enqueueFinding({ finding: pf, reviewId, run, dashboardUrl });
+      // Retry enqueue from persisted conclusions too: a crash between review
+      // commit and outbox enqueue must not lose the one Trace notification.
+      try {
+        const traces = db.prepare(`SELECT * FROM audit_traces
+          WHERE sealed_at IS NOT NULL AND review_version > 0 AND risk_level = 'high'`).all();
+        for (const trace of traces) {
+          try {
+            notifier.enqueueTrace?.({ trace, dashboardUrl: visualization.dashboardUrlFor(trace) });
+          } catch (err) {
+            logAudit('review.notification.enqueued', 'INTERNAL', `Trace notification enqueue failed (${trace.agent_id}/${trace.trace_id}): ${err.message}`, 'audit.notify');
           }
         }
-        logAudit(
-          'review.notification.enqueued',
-          'OK',
-          `Notifications enqueued for review ${reviewId}.`,
-          'audit.notify',
-        );
       } catch (err) {
-        logAudit(
-          'review.notification.enqueued',
-          'INTERNAL',
-          `Notification enqueue failed: ${err.message}`,
-          'audit.notify',
-        );
+        logAudit('review.notification.enqueued', 'INTERNAL', `Trace notification enqueue failed: ${err.message}`, 'audit.notify');
       }
 
       // 10. The run was completed atomically with findings and occurrences.
@@ -886,8 +645,8 @@ export function createAuditReviewScheduler({
 
   function stop() {
     started = false;
-    clearRefreshTimer();
     clearScheduledTimer();
+    return reviewChain.catch(() => {}).finally(clearRefreshTimer);
   }
 
   return {

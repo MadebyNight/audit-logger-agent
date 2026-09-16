@@ -18,7 +18,7 @@ function fixture(t) {
 
 function seed(db, agent = 'a', trace = 'trace', at = AT, overrides = {}) {
   db.prepare(`INSERT INTO audit_traces (agent_id,trace_id,requester_id,original_request,
-    agent_result,context_status,last_event_at,updated_at) VALUES (?,?,'user','request','result','complete',?,?)`).run(agent, trace, at, AT);
+    agent_result,context_status,last_event_at,updated_at,event_count) VALUES (?,?,'user','request','result','complete',?,?,1)`).run(agent, trace, at, AT);
   for (const [key, value] of Object.entries(overrides)) {
     db.prepare(`UPDATE audit_traces SET ${key}=? WHERE agent_id=? AND trace_id=?`).run(value, agent, trace);
   }
@@ -231,9 +231,17 @@ test('HTTP health includes trace and redaction metrics', async (t) => {
   assert.equal(body.traces.review_failed_pending_cleanup, 0);
   assert.deepEqual(body.traces.redaction_hits_by_agent, [{ agent_id: 'a', redaction_hits: 2 }]);
   db.prepare(`UPDATE audit_traces SET sealed_at=?, last_event_at='2026-07-01T00:00:00.000Z',
-    ingested_watermark=?, review_error=1, review_retry_count=2`).run(AT, AT);
+    ingested_watermark=?, event_count=0, review_error=1, review_retry_count=2`).run(AT, AT);
+  const unaggregated = await (await fetch(`${url}/health`)).json();
+  assert.equal(unaggregated.traces.review_failed_pending_cleanup, 0,
+    'unaggregated evidence must protect an otherwise expired failed Trace');
+  db.prepare('UPDATE audit_traces SET event_count=1').run();
   const failed = await (await fetch(`${url}/health`)).json();
   assert.equal(failed.traces.review_failed_pending_cleanup, 1, 'health must use the actual retention selection');
+  db.prepare("UPDATE audit_traces SET review_version=1, trace_status='success', risk_level='none'").run();
+  const failedRevision = await (await fetch(`${url}/health`)).json();
+  assert.equal(failedRevision.traces.review_failed_pending_cleanup, 1,
+    'exhausted re-review failures must also count once eligible for cleanup');
 });
 
 test('Dashboard routes decode composite keys and pass group/user controls, including unknown requester', async (t) => {

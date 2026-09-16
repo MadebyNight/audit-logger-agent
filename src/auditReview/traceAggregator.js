@@ -1,6 +1,9 @@
 // src/auditReview/traceAggregator.js
 import crypto from 'crypto';
 import { computeInputHash } from './traceStore.js';
+import { createReviewStore } from './reviewStore.js';
+import { estimateTokensForPayload, llmBudgetFromConfig } from './llmBudget.js';
+import { traceReviewInput } from './llmReviewer.js';
 
 const CURSOR_NAME = 'trace_aggregation';
 const TERMINAL_EVENTS = new Set(['run.final_result', 'run.failed']);
@@ -49,19 +52,30 @@ function isTimeout(eventAt, minutes, now) {
 }
 
 function hasFailureEvidence(events) {
-  return events.some((event) => {
-    const status = String(event.status ?? '').toUpperCase();
-    return event.event === 'tool.error' ||
-      ['ERROR', 'INTERNAL', 'TIMEOUT', 'CANCELLED'].includes(status) ||
-      String(event.tool_name ?? '').toLowerCase().includes('retry');
-  });
+  return events.some((event) => event.event === 'tool.error' ||
+    (String(event.event).startsWith('tool.') && ['ERROR', 'INTERNAL', 'TIMEOUT', 'CANCELLED', 'FAILED'].includes(String(event.status).toUpperCase())) ||
+    ['run.interrupted', 'agent.error'].includes(event.event));
 }
 
-function hasLongLoopEvidence(events) {
-  return events.some((event) => {
-    const status = String(event.status ?? '').toUpperCase();
-    return status === 'TIMEOUT' || String(event.tool_name ?? '').toLowerCase().includes('loop');
-  });
+function hasMinorEvidence(events) {
+  return events.some((event) => /retry|warn|timeout/i.test(event.event) ||
+    ['WARN', 'WARNING', 'RETRY', 'TIMEOUT'].includes(String(event.status).toUpperCase()));
+}
+
+function hasLongLoopEvidence(events, policy = {}) {
+  const tools = events.filter((event) => String(event.event).startsWith('tool.'));
+  const invocations = new Set(tools.map((event) => event.span_id ? JSON.stringify([event.tool_name, event.span_id]) : `event:${event.event_id}`));
+  if (invocations.size > (policy.traceToolChainStepThreshold ?? 50)) return true;
+  const buckets = new Map();
+  for (const event of tools) {
+    const key = JSON.stringify([event.tool_name, event.entity_type, event.entity_id]);
+    const cutoff = Date.parse(event.ts) - (policy.repeatWindowMinutes ?? 10) * 60000;
+    const bucket = (buckets.get(key) ?? []).filter((prior) => Date.parse(prior.ts) >= cutoff && prior.span_id !== event.span_id);
+    bucket.push(event);
+    buckets.set(key, bucket);
+    if (bucket.length >= (policy.repeatThreshold ?? 5)) return true;
+  }
+  return events.some((event) => /(?:^|\.)loop(?:$|\.)/.test(event.event));
 }
 
 function sealDecision({ trace, events, now, options }) {
@@ -70,30 +84,42 @@ function sealDecision({ trace, events, now, options }) {
   }
   const last = events.at(-1);
   if (last?.event === 'run.waiting_user' && isTimeout(last.ts, options.waitingUserTimeoutMinutes, now)) {
-    return { sealed: true, reason: 'waiting_user_timeout', sealedAt: nowIso() };
+    return { sealed: true, reason: 'waiting_user_timeout', sealedAt: now };
   }
   if (last?.event !== 'run.waiting_user' && isTimeout(trace.last_event_at, options.idleTimeoutMinutes, now)) {
-    return { sealed: true, reason: 'idle_timeout', sealedAt: nowIso() };
+    return { sealed: true, reason: 'idle_timeout', sealedAt: now };
   }
   return { sealed: false, reason: null, sealedAt: null };
 }
 
-function priorityOf(event, events) {
-  if (HIGH_SIGNAL_EVENTS.has(event.event)) return 1;
-  if (hasFailureEvidence([event])) return 2;
-  const sameSpan = events.filter((candidate) => candidate.span_id === event.span_id);
-  if (sameSpan.at(0)?.event_id === event.event_id || sameSpan.at(-1)?.event_id === event.event_id) return 3;
-  return 4;
-}
-
 function sampleEvents(events, maxEvents) {
+  maxEvents = Math.max(1, Math.floor(maxEvents));
   if (events.length <= maxEvents) return { events, sampled: false, omitted: 0 };
+  const edges = new Map();
+  for (const event of events) {
+    if (!event.span_id) continue;
+    const edge = edges.get(event.span_id) ?? [event.event_id, event.event_id];
+    edge[1] = event.event_id;
+    edges.set(event.span_id, edge);
+  }
+  const edgeIds = new Set([...edges.values()].flat());
   const buckets = [[], [], [], []];
-  for (const event of events) buckets[priorityOf(event, events) - 1].push(event);
+  for (const event of events) {
+    const priority = HIGH_SIGNAL_EVENTS.has(event.event) ? 0
+      : hasFailureEvidence([event]) || hasMinorEvidence([event]) || /loop|fail|error/i.test(event.event) ? 1
+      : edgeIds.has(event.event_id) ? 2 : 3;
+    buckets[priority].push(event);
+  }
   const selected = [];
-  for (const bucket of buckets) {
-    if (selected.length >= maxEvents) break;
-    selected.push(...bucket.slice(0, maxEvents - selected.length));
+  // Priority buckets share a strict budget; ties use ts/id order. The last
+  // bucket retains both ends so mundane trailing evidence remains visible.
+  for (const [index, bucket] of buckets.entries()) {
+    const remaining = maxEvents - selected.length;
+    if (remaining <= 0) break;
+    if (index === 3 && bucket.length > remaining) {
+      const head = Math.ceil(remaining / 2);
+      selected.push(...bucket.slice(0, head), ...(remaining > head ? bucket.slice(-(remaining - head)) : []));
+    } else selected.push(...bucket.slice(0, remaining));
   }
   selected.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts) || a.event_id - b.event_id);
   return { events: selected, sampled: true, omitted: events.length - selected.length };
@@ -103,11 +129,13 @@ function evidenceIds(events) {
   return events.map((event) => event.event_id);
 }
 
-function deterministicOutcome(events, traceStatus = null) {
+function deterministicOutcome(events, policy = {}) {
   const final = events.find((event) => event.event === 'run.final_result');
   const failed = events.find((event) => event.event === 'run.failed');
+  const ended = new Set(events.filter((event) => ['agent.end', 'agent.error'].includes(event.event)).map((event) => event.span_id));
+  const unfinishedChildren = events.filter((event) => event.event === 'agent.start' && !ended.has(event.span_id));
   const failureEvidence = hasFailureEvidence(events);
-  const longLoop = hasLongLoopEvidence(events);
+  const longLoop = hasLongLoopEvidence(events, policy);
   if (failed || events.some((event) => String(event.status ?? '').toUpperCase() === 'CANCELLED' && TERMINAL_EVENTS.has(event.event))) {
     return {
       needsLlm: false,
@@ -119,13 +147,21 @@ function deterministicOutcome(events, traceStatus = null) {
       },
     };
   }
-  if (final && !failureEvidence && !longLoop) {
+  // Called only after sealing: a parent's success cannot complete a child Span.
+  if (unfinishedChildren.length > 0) {
+    return { needsLlm: false, outcome: {
+      trace_status: 'interrupted', risk_level: 'high',
+      risk_reason: 'Trace 已封存，但子 Agent 缺少终止事件，任务链路中断，需要人工介入。',
+      evidence_event_ids: evidenceIds(unfinishedChildren),
+    } };
+  }
+  if (final && !failureEvidence && !longLoop && !hasMinorEvidence(events)) {
     return {
       needsLlm: false,
       outcome: {
         trace_status: 'success',
         risk_level: 'none',
-        risk_reason: '任务成功完成，未发现工具错误、超时、重试或长循环证据。',
+        risk_reason: '任务成功完成，未发现工具错误或长循环证据。',
         evidence_event_ids: [final.event_id],
       },
     };
@@ -136,7 +172,7 @@ function deterministicOutcome(events, traceStatus = null) {
       outcome: {
         trace_status: 'success',
         risk_level: 'medium',
-        risk_reason: '任务最终完成，但过程存在工具错误、超时、重试或长循环证据。',
+        risk_reason: '任务最终完成，但过程存在工具错误或长循环证据。',
         evidence_event_ids: evidenceIds(events.filter((event) =>
           event.event === 'run.final_result' ||
           ['ERROR', 'INTERNAL', 'TIMEOUT', 'CANCELLED'].includes(String(event.status ?? '').toUpperCase()))),
@@ -154,7 +190,7 @@ function deterministicOutcome(events, traceStatus = null) {
       },
     };
   }
-  return { needsLlm: true, trace_status: traceStatus ?? 'incomplete' };
+  return { needsLlm: true, trace_status: final ? 'success' : 'incomplete' };
 }
 
 function buildLlmInput(trace, events) {
@@ -182,12 +218,14 @@ function buildLlmInput(trace, events) {
       error_message: event.error_message,
       result_summary: event.result_summary,
       ...(event.llm_intent_json ? { llm_intent: safeJson(event.llm_intent_json) } : {}),
-      requester_id: event.requester_id,
-      original_request: event.original_request,
-      agent_result: event.agent_result,
-      expected_purpose: event.expected_purpose,
     })),
   };
+}
+
+function withConflicts(outcome, trace, events) {
+  const ids = events.filter((event) => ['requester_id', 'original_request', 'agent_result', 'expected_purpose'].some((field) =>
+    event[field] != null && event[field] !== '' && trace[field] != null && event[field] !== trace[field])).map((event) => event.event_id);
+  return ids.length ? { ...outcome, risk_reason: `${outcome.risk_reason}；任务字段冲突事件ID：${ids.join(',')}` } : outcome;
 }
 
 function safeJson(value) {
@@ -201,6 +239,8 @@ function safeJson(value) {
 export function createTraceAggregator({ db, config, traceStore, llmReviewer, lockStore, now = () => new Date() }) {
   const options = traceConfig(config);
   const cursorName = CURSOR_NAME;
+  const usageStore = createReviewStore(db);
+  const budget = llmBudgetFromConfig(config);
   const getCursorStmt = db.prepare(`SELECT * FROM audit_trace_scan_cursor WHERE cursor_name = ?`);
   const upsertCursorStmt = db.prepare(`
     INSERT INTO audit_trace_scan_cursor (cursor_name, last_ingested_at, last_event_id, updated_at)
@@ -245,16 +285,17 @@ export function createTraceAggregator({ db, config, traceStore, llmReviewer, loc
     const trace = {
       agent_id: agentId,
       trace_id: traceId,
-      requester_id: firstNonEmpty(events, 'requester_id'),
-      original_request: firstNonEmpty(events, 'original_request'),
+      requester_id: events.find((event) => event.event === 'run.start')?.requester_id ?? null,
+      original_request: events.find((event) => event.event === 'run.start')?.original_request ?? null,
       expected_purpose: firstNonEmpty(events, 'expected_purpose'),
-      agent_result: firstNonEmpty(events, 'agent_result'),
+      agent_result: events.filter((event) => TERMINAL_EVENTS.has(event.event)).at(-1)?.agent_result ?? null,
       first_event_at: first?.ts,
       last_event_at: last?.ts,
-      ingested_watermark: events.at(-1)?.ingested_at,
+      ingested_watermark: events.reduce((latest, event) => event.ingested_at > latest ? event.ingested_at : latest, ''),
       event_count: events.length,
     };
     trace.context_status = contextStatusFor(trace);
+    if (trace.context_status === 'unknown') trace.context_status = 'incomplete_context';
     return trace;
   }
 
@@ -262,7 +303,8 @@ export function createTraceAggregator({ db, config, traceStore, llmReviewer, loc
     const events = listTraceEventsStmt.all({ agent_id: agentId, trace_id: traceId }).map((event) => ({ ...event, event_id: event.id }));
     if (events.length === 0) return null;
     const facts = aggregateFacts(agentId, traceId, events);
-    traceStore.upsertPendingTrace(facts);
+    const previous = traceStore.getTrace(agentId, traceId);
+    if (!previous || previous.event_count !== facts.event_count || previous.ingested_watermark !== facts.ingested_watermark) traceStore.upsertPendingTrace(facts);
     const existing = traceStore.getTrace(agentId, traceId);
     const decision = sealDecision({ trace: facts, events, now: now().toISOString(), options });
     if (!existing.sealed_at && decision.sealed) {
@@ -272,59 +314,75 @@ export function createTraceAggregator({ db, config, traceStore, llmReviewer, loc
   }
 
   async function reviewSealedTrace(agentId, traceId) {
-    const trace = traceStore.getTrace(agentId, traceId);
-    if (!trace || !trace.sealed_at || trace.sealed_reason === 'backfill') return { reviewed: false, reason: 'not_reviewable' };
-    const inputHash = computeInputHash({ ...trace, events: listTraceEventsStmt.all({ agent_id: agentId, trace_id: traceId }).map((event) => ({ ...event, event_id: event.id })) });
-    if (trace.input_hash === inputHash && trace.review_error === 0) return { reviewed: false, reason: 'unchanged' };
-    const events = listTraceEventsStmt.all({ agent_id: agentId, trace_id: traceId }).map((event) => ({ ...event, event_id: event.id }));
-    const sampled = sampleEvents(events, options.maxEventsPerTrace);
-    const deterministic = deterministicOutcome(sampled.events);
-    if (!deterministic.needsLlm) {
-      const updated = traceStore.applySuccessfulReview({
-        trace: { agent_id: agentId, trace_id: traceId },
-        outcome: deterministic.outcome,
-        inputHash,
-        model: null,
-        promptVersion: null,
-        reviewInputSampled: sampled.sampled,
-        omittedEventCount: sampled.omitted,
-      });
-      return { reviewed: true, trace: updated, usedLlm: false };
-    }
-    const lockName = `trace_review:${agentId}:${traceId}`;
+    const lockName = `trace_review:${JSON.stringify([agentId, traceId])}`;
     const ownerId = `trace_${crypto.randomUUID()}`;
-    const acquired = lockStore.acquire({ lockName, ownerId, leaseMinutes: 5 });
+    const acquired = db.transaction(() => lockStore.acquire({ lockName, ownerId, leaseMinutes: 5 })).immediate();
     if (!acquired.acquired) return { reviewed: false, reason: 'locked' };
+    const refresh = setInterval(() => lockStore.refresh({ lockName, ownerId, leaseMinutes: 5 }), 60000);
+    refresh.unref?.();
     try {
+      const trace = traceStore.getTrace(agentId, traceId);
+      if (!trace || !trace.sealed_at || trace.sealed_reason === 'backfill') return { reviewed: false, reason: 'not_reviewable' };
+      const events = listTraceEventsStmt.all({ agent_id: agentId, trace_id: traceId }).map((event) => ({ ...event, event_id: event.id }));
+      const inputHash = computeInputHash({ ...trace, events });
+      if (trace.input_hash === inputHash && trace.review_error === 0) return { reviewed: false, reason: 'unchanged' };
+      const sampled = sampleEvents(events, options.maxEventsPerTrace);
+      const deterministic = deterministicOutcome(events, config.auditReview?.riskPolicy);
+      if (!deterministic.needsLlm) {
+        const updated = traceStore.applySuccessfulReview({
+          trace: { agent_id: agentId, trace_id: traceId },
+          outcome: withConflicts(deterministic.outcome, trace, events),
+          inputHash,
+          model: null,
+          promptVersion: null,
+          reviewInputSampled: sampled.sampled,
+          omittedEventCount: sampled.omitted,
+        });
+        return { reviewed: true, trace: updated, usedLlm: false };
+      }
+      if (trace.review_retry_count >= options.maxInvalidOutputRetries) return { reviewed: false, reason: 'retries_exhausted' };
+      const payload = traceReviewInput(buildLlmInput(trace, sampled.events));
+      const reserved = usageStore.reserveLlmUsage({ day: now().toISOString().slice(0, 10),
+        calls: 1, estTokens: estimateTokensForPayload(payload), ...budget });
+      if (!reserved.reserved) return { reviewed: false, reason: 'llm_budget_exceeded' };
       const llmResult = await awaitLlmReview(trace, sampled.events, deterministic.trace_status);
       if (!llmResult.ok) {
-        traceStore.markReviewError({
+        const recorded = db.transaction(() => {
+          const lease = lockStore.getLock(lockName);
+          if (lease?.owner_id !== ownerId || lease.lease_expires_at <= new Date().toISOString()) return false;
+          traceStore.markReviewError({
           agentId,
           traceId,
           riskReason: llmResult.error,
           maxRetries: options.maxInvalidOutputRetries,
-        });
+          });
+          return true;
+        }).immediate();
+        if (!recorded) return { reviewed: false, reason: 'lease_lost' };
         return { reviewed: false, usedLlm: true, error: llmResult.error };
       }
-      const updated = traceStore.applySuccessfulReview({
-        trace: { agent_id: agentId, trace_id: traceId },
-        outcome: llmResult.outcome,
-        inputHash,
-        model: llmResult.model,
-        promptVersion: llmResult.promptVersion,
-        reviewInputSampled: sampled.sampled,
-        omittedEventCount: sampled.omitted,
-      });
+      const updated = db.transaction(() => {
+        const currentEvents = listTraceEventsStmt.all({ agent_id: agentId, trace_id: traceId }).map((event) => ({ ...event, event_id: event.id }));
+        if (computeInputHash({ ...trace, events: currentEvents }) !== inputHash) return null;
+        if (lockStore.getLock(lockName)?.owner_id !== ownerId) return null;
+        return traceStore.applySuccessfulReview({
+          trace: { agent_id: agentId, trace_id: traceId },
+          outcome: withConflicts(llmResult.outcome, trace, events), inputHash,
+          model: llmResult.model, promptVersion: llmResult.promptVersion,
+          reviewInputSampled: sampled.sampled, omittedEventCount: sampled.omitted,
+        });
+      }).immediate();
+      if (!updated) return { reviewed: false, reason: 'input_changed' };
       return { reviewed: true, trace: updated, usedLlm: true };
     } finally {
+      clearInterval(refresh);
       lockStore.release({ lockName, ownerId });
     }
   }
 
   function awaitLlmReview(trace, events, traceStatus) {
-    // Synchronous scheduler path requires the injected reviewer to return a Promise.
     const input = buildLlmInput({ ...trace, review_input_sampled: events.length < trace.event_count, omitted_event_count: trace.event_count - events.length }, events);
-    return Promise.resolve(llmReviewer.reviewTrace({ trace: input, traceStatus })).then((result) => {
+    return Promise.resolve().then(() => llmReviewer.reviewTrace({ trace: input, traceStatus })).then((result) => {
       if (!result.ok) return result;
       const evidence = new Set(events.map((event) => event.event_id));
       if (!Array.isArray(result.outcome.evidence_event_ids) ||
@@ -332,6 +390,7 @@ export function createTraceAggregator({ db, config, traceStore, llmReviewer, loc
           result.outcome.evidence_event_ids.some((id) => !evidence.has(id))) {
         return { ok: false, error: 'invalid evidence_event_ids' };
       }
+      if (trace.risk_level !== 'high' && ({ none: 0, low: 1, medium: 2 }[result.outcome.risk_level] < { none: 0, low: 1, medium: 2 }[trace.risk_level])) return { ok: false, error: 'risk downgrade rejected' };
       const allowed = traceStatus === 'success' ? ['none', 'low', 'medium'] : ['none', 'low'];
       if (!allowed.includes(result.outcome.risk_level)) {
         return { ok: false, error: `invalid risk_level for ${traceStatus}` };
@@ -352,7 +411,7 @@ export function createTraceAggregator({ db, config, traceStore, llmReviewer, loc
   return {
     processTrace,
     reviewSealedTrace,
-    async run({ nowIso: nowOverride } = {}) {
+    async run() {
       const currentCursor = cursor();
       const newEvents = listNewEventsStmt.all({
         ingested_at: currentCursor.last_ingested_at ?? '',
@@ -360,16 +419,17 @@ export function createTraceAggregator({ db, config, traceStore, llmReviewer, loc
       });
       const grouped = new Map();
       for (const event of newEvents) {
-        const key = `${event.agent_id}|${event.trace_id}`;
+        const key = JSON.stringify([event.agent_id, event.trace_id]);
         grouped.set(key, grouped.get(key) ?? []);
         grouped.get(key).push(event);
       }
-      for (const [key] of grouped) processTrace(key.split('|')[0], key.split('|')[1]);
+      for (const [key] of grouped) processTrace(...JSON.parse(key));
       for (const trace of listUnsealedStmt.all()) processTrace(trace.agent_id, trace.trace_id);
       const rows = db.prepare(`SELECT agent_id, trace_id, sealed_at, sealed_reason FROM audit_traces WHERE sealed_at IS NOT NULL`).all();
+      const reviews = [];
       for (const row of rows) {
         if (row.sealed_reason === 'backfill') continue;
-        await reviewSealedTrace(row.agent_id, row.trace_id);
+        reviews.push(await reviewSealedTrace(row.agent_id, row.trace_id));
       }
       const lastEvent = newEvents.at(-1);
       if (lastEvent) {
@@ -380,11 +440,7 @@ export function createTraceAggregator({ db, config, traceStore, llmReviewer, loc
           updated_at: nowIso(),
         });
       }
-      return { scannedEvents: newEvents.length, updatedTraces: grouped.size, reviewedTraces: rows.filter((row) => row.sealed_reason !== 'backfill').length };
+      return { scannedEvents: newEvents.length, updatedTraces: grouped.size, reviewedTraces: reviews.filter((result) => result.reviewed).length, reviews };
     },
   };
 }
-
-
-
-

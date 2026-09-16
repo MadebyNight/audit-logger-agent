@@ -202,6 +202,7 @@ const llmReviewer = createLlmReviewer({
   reviewerVersion: runtimeConfig.auditReview?.llmReview?.reviewerVersion,
 });
 const reviewNotifier = createReviewNotifier({
+  db,
   outboxStore,
   config: runtimeConfig,
   feishuMode: feishuRuntimeConfig.mode,

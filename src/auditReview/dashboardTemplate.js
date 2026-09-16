@@ -31,6 +31,7 @@ function visibleMetrics(metrics = []) {
 
 function visibleSections(sections = []) {
   return sections.filter((section) => {
+    if (['requester_groups', 'task_list'].includes(section.type)) return true;
     if (section.type === 'table') return Array.isArray(section.rows) && section.rows.length > 0;
     if (section.type === 'definition_list') return Array.isArray(section.items) && section.items.some((item) => hasValue(item.value));
     if (section.type === 'link_list') return Array.isArray(section.links) && section.links.length > 0;
@@ -197,7 +198,7 @@ function renderBreadcrumbs(breadcrumbs) {
     }
 
     return `<span class="breadcrumb-current"${isLast ? ' aria-current="page"' : ''}>${label}</span>`;
-  }).join('<span class="breadcrumb-separator" aria-hidden="true">›</span>');
+  }).join(`<span class="breadcrumb-separator" aria-hidden="true">${lucideChevron()}</span>`);
 
   return `<nav class="breadcrumbs" aria-label="页面导航">${items}</nav>`;
 }
@@ -474,9 +475,41 @@ function renderConfirmationSection(section) {
   });
 }
 
+function lucideChevron() {
+  return '<svg class="lucide lucide-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>';
+}
+
+function renderTaskRows(tasks = []) {
+  if (!tasks.length) return '<p class="empty-state">暂无任务</p>';
+  return tasks.map((task) => `<a class="task-row" href="${escapeHtml(task.href)}">
+    <time class="mono">${escapeHtml(task.time)}</time>
+    <span class="task-request">${escapeHtml(task.request)}${task.incomplete ? '<small>上下文不完整</small>' : ''}</span>
+    ${renderStatusTag(task.state.text, task.state.tone)}${lucideChevron()}
+  </a>`).join('');
+}
+
+function renderRequesterGroups(section) {
+  const groups = section.groups.map((group) => `<details class="requester-group"${group.open ? ' open' : ''}>
+    <summary><span class="requester-name">${escapeHtml(group.name)}</span>
+      ${!group.requester_id ? '<span>上下文不完整</span>' : ''}
+      <span class="mono">${group.count} 任务</span><time class="mono">${escapeHtml(group.time)}</time>${lucideChevron()}</summary>
+    <div class="group-tasks"><div class="group-caption">${group.attention} 条需要介入
+      <a href="${escapeHtml(group.href)}">查看全部任务 / 分享此分组</a></div>${renderTaskRows(group.tasks)}</div>
+  </details>`).join('');
+  return renderDataSection({ id: section.id, title: section.title, className: 'requester-section', body: `
+    <div class="group-toolbar"><form method="get" action="${escapeHtml(section.action)}">
+      <label for="requester-search"><svg class="lucide lucide-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>按发起人筛选</label>
+      <input id="requester-search" name="q" type="search" placeholder="发起人 ID 或展示名" value="${escapeHtml(section.search)}"><button type="submit">搜索</button>
+    </form><div><button type="button" data-group-expand="true">全部展开</button><button type="button" data-group-expand="false">全部折叠</button></div></div>
+    ${groups || '<p class="empty-state">没有匹配的发起人</p>'}
+    ${section.moreHref ? `<a class="load-more" href="${escapeHtml(section.moreHref)}">加载更多</a>` : ''}` });
+}
+
 function renderSection(section) {
   if (!section) return '';
   switch (section.type) {
+    case 'requester_groups': return renderRequesterGroups(section);
+    case 'task_list': return renderDataSection({ id: section.id, title: section.title, body: renderTaskRows(section.tasks) });
     case 'table': return renderTableSection(section);
     case 'definition_list': return renderDefinitionListSection(section);
     case 'link_list': return renderLinkListSection(section);
@@ -1346,9 +1379,71 @@ footer { text-align: center; color: var(--text-muted); font-size: 12px; padding:
     animation-iteration-count: 1 !important;
   }
 }
+.lucide { width: 16px; height: 16px; flex: 0 0 auto; vertical-align: middle; }
+.task-audit {
+  --surface-canvas: #0B0F14; --surface-panel: #111926; --surface-subtle: #0E141C;
+  --text-primary: #E6EDF3; --text-secondary: #9FB0BF; --border-default: #1C2531;
+  --action-primary: #7EB6E8; --action-primary-hover: #A3CCF0;
+  --status-neutral: #9FB0BF; --status-neutral-bg: #151C26;
+  --status-high: #F0616D; --status-high-bg: #2A1216;
+  --status-medium: #FFB454; --status-medium-bg: #241A0F;
+  --status-success: #3FD68F; --status-success-bg: #0F2A20;
+  --bg: #0B0F14; --surface: #111926; --surface-muted: #0E141C;
+  --text: #E6EDF3; --text-muted: #9FB0BF; --border: #1C2531; --accent: #7EB6E8;
+  background: var(--surface-canvas); color: var(--text-primary);
+}
+.task-audit .container { max-width: 1180px; margin-inline: auto; }
+.task-audit .data-section { box-shadow: none; border-color: var(--border-default); }
+.task-audit .data-section { background: var(--surface-panel); }
+.task-audit .app-bar { background: var(--surface-subtle); }
+.task-audit #task_context, .task-audit #task_audit_result { padding-block: 12px; }
+.task-audit .section-title { margin-bottom: 8px; font-size: 15px; }
+.task-audit .data-section { margin-bottom: 12px; }
+.task-audit .meta-row { gap: 10px; padding-block: 3px; }
+.task-audit .meta-key { width: 110px; }
+.task-audit #task_conclusion .metadata-block { display: flex; flex-wrap: wrap; gap: 10px 24px; }
+.task-audit #task_conclusion .meta-row { border: 0; }
+.task-audit #task_conclusion .meta-key { width: auto; }
+.task-audit #task_conclusion .meta-val { flex: auto; }
+.task-audit .page-title { font-size: 24px; }
+.task-audit .meta-value, .task-audit .trace-step-body { min-width: 0; overflow-wrap: anywhere; }
+.task-audit .raw-log-pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-audit #task_conclusion { border-left: 2px solid var(--status-high); }
+.task-audit .status-tag { font-family: inherit; }
+.group-toolbar, .group-toolbar form, .group-toolbar label, .group-caption { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.group-toolbar { justify-content: space-between; margin-bottom: 18px; }
+.group-toolbar input, .group-toolbar button { color: var(--text-primary); background: var(--surface-subtle); border: 1px solid var(--border-default); padding: 9px 12px; font: inherit; }
+.group-toolbar button { cursor: pointer; }
+.requester-group { background: var(--surface-panel); border: 1px solid var(--border-default); border-left: 2px solid #2B3846; margin-top: 8px; }
+.requester-group[open] { border-left-color: #3FD68F; }
+.requester-group summary { display: flex; align-items: center; gap: 14px; padding: 16px; cursor: pointer; list-style: none; }
+.requester-group summary::-webkit-details-marker { display: none; }
+.requester-group[open] > summary .lucide { transform: rotate(90deg); }
+.requester-name, .task-request { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.group-tasks { border-top: 1px solid var(--border-default); padding: 0 16px 12px; }
+.group-caption { justify-content: space-between; padding: 12px 0; color: var(--text-secondary); }
+.task-row { display: flex; align-items: center; gap: 16px; padding: 14px 0; border-top: 1px solid var(--border-default); color: var(--text-primary); text-decoration: none; }
+.task-row:hover { background: var(--surface-subtle); }
+.task-row time, .requester-group time { font-size: 11px; color: var(--text-secondary); }
+.task-request small { display: block; margin-top: 4px; color: var(--text-secondary); }
+.load-more { display: block; padding: 16px; text-align: center; }
+@media (max-width: 720px) {
+  .task-audit .container { padding: 16px 14px; }
+  .task-audit .data-table { min-width: 0; width: 100%; table-layout: fixed; }
+  .task-audit .data-table th, .task-audit .data-table td { white-space: normal; overflow-wrap: anywhere; }
+  .task-audit .meta-row, .task-audit .kv { display: grid; grid-template-columns: 1fr; }
+  .task-audit #task_context .metadata-block, .task-audit #task_audit_result .metadata-block { grid-template-columns: 1fr; }
+  .task-audit .app-bar-shell, .task-audit .context-header { flex-direction: column; align-items: stretch; }
+  .task-audit .app-nav { flex-wrap: wrap; overflow: visible; }
+  .task-row, .requester-group summary { flex-wrap: wrap; }
+  .task-request, .requester-name { flex-basis: 100%; }
+  .group-toolbar, .group-toolbar form { align-items: stretch; flex-direction: column; width: 100%; }
+  .group-toolbar input { min-width: 0; width: 100%; }
+  .task-audit .mono, .task-audit .breadcrumbs { overflow-wrap: anywhere; }
+}
 </style>
 </head>
-<body>
+<body${page.task_audit ? ' class="task-audit"' : ''}>
 <a class="skip-link" href="#main-content">跳到主要内容</a>
 <header class="app-bar">
   <div class="app-bar-shell">
@@ -1359,8 +1454,8 @@ footer { text-align: center; color: var(--text-muted); font-size: 12px; padding:
     </div>
     <nav class="app-nav" aria-label="主导航">
       <a href="/" class="app-nav-link">Agent</a>
-      <a href="/dashboard#pending_findings" class="app-nav-link">风险发现</a>
-      <a href="/dashboard#reviews_with_findings" class="app-nav-link">审查批次</a>
+      ${page.agent_index ? '' : `<a href="/dashboard#pending_findings" class="app-nav-link">风险发现</a>
+      <a href="/dashboard#reviews_with_findings" class="app-nav-link">审查批次</a>`}
     </nav>
     <div class="app-meta">
       ${notificationStatus}
@@ -1384,6 +1479,15 @@ footer { text-align: center; color: var(--text-muted); font-size: 12px; padding:
   ${sections}
 </main>
 <footer>audit-logger-agent 审计看板</footer>
+${templateInput?.sections?.some((section) => section.type === 'requester_groups') ? `<script>
+document.querySelectorAll('[data-group-expand]').forEach(function(button) {
+  button.addEventListener('click', function() {
+    document.querySelectorAll('.requester-group').forEach(function(group) {
+      group.open = button.dataset.groupExpand === 'true';
+    });
+  });
+});
+</script>` : ''}
 </body>
 </html>`;
 }

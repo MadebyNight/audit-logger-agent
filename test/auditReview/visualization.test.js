@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { renderDashboard } from '../../src/auditReview/dashboardTemplate.js';
 import { createVisualization } from '../../src/auditReview/visualization.js';
 
 function finding(overrides = {}) {
@@ -244,7 +245,7 @@ test('overviewPage returns linked review and finding sections', () => {
   const page = createViz().overviewPage();
 
   assert.equal(page.page.title, '审计审查总览');
-  assert.ok(page.summary_metrics.some((metric) => metric.label === '严重'));
+  assert.ok(page.summary_metrics.some((metric) => metric.label === '高风险'));
   assert.ok(page.page.page_actions.some((action) => action.href.includes('/dashboard/audit-reviews/')));
 
   const findingsSection = page.sections.find((section) => section.id === 'pending_findings');
@@ -268,7 +269,7 @@ test('overviewPage returns linked review and finding sections', () => {
   assert.ok(page.sections.find((section) => section.id === 'reviews_without_findings'));
 });
 
-test('agentIndexPage lists received agent ids linked to filtered dashboard', () => {
+test('agentIndexPage lists received agents linked to requester groups without risk details', () => {
   const page = createViz({
     agents: [
       {
@@ -292,9 +293,13 @@ test('agentIndexPage lists received agent ids linked to filtered dashboard', () 
   const section = page.sections.find((item) => item.id === 'received_agents');
   assert.equal(section.title, '已接收日志的 Agent');
   assert.equal(section.rows[0].agent_id.text, 'agent-1');
-  assert.equal(section.rows[0].agent_id.href, '/dashboard?agent_id=agent-1');
-  assert.equal(section.rows[1].agent_id.href, '/dashboard?agent_id=agent.2');
-  assert.ok(page.page.page_actions.some((action) => action.href === '/dashboard'));
+  assert.equal(section.rows[0].agent_id.href, '/dashboard/agents/agent-1');
+  assert.equal(section.rows[1].agent_id.href, '/dashboard/agents/agent.2');
+  assert.doesNotMatch(JSON.stringify(page.sections), /finding|severity|risk_level/);
+  assert.deepEqual(page.page.page_actions, []);
+  const html = renderDashboard(page);
+  assert.doesNotMatch(html, /风险发现|审查批次|查看全部审计|pending_findings|reviews_with_findings/);
+  assert.match(html, /href="\/dashboard\/agents\/agent-1"/);
 });
 
 test('manualDailyReportPage returns a server-rendered Beijing-time confirmation model', () => {
@@ -374,7 +379,7 @@ test('overviewPage renders only Agent logs and links back to agent index', () =>
   assert.equal(page.page.page_actions.find((action) => action.href === '/').kind, 'secondary');
   assert.equal(page.page.page_actions.find((action) => action.label === '打开最高风险发现').kind, 'primary');
   assert.equal(page.page.page_actions.some((action) => action.label === '打开最新降级审查'), false);
-  assert.ok(page.summary_metrics.some((metric) => metric.href === '/dashboard?agent_id=agent-1&severity=critical&log_page=1#agent_logs'));
+  assert.ok(page.summary_metrics.some((metric) => metric.href === '/dashboard?agent_id=agent-1&severity=high&log_page=1#agent_logs'));
   const logsSection = page.sections.find((section) => section.id === 'agent_logs');
   assert.equal(logsSection.title, 'Agent 日志（第 1/1 页，共 2 条）');
   assert.deepEqual(logsSection.columns.map((column) => column.key), [
@@ -395,7 +400,7 @@ test('overviewPage renders only Agent logs and links back to agent index', () =>
   assert.equal(logsSection.rows[0].status.href, '/dashboard?agent_id=agent-1&log_page=1&log_status=INTERNAL#agent_logs');
   assert.equal(logsSection.rows[0].trace_id.href, '/dashboard?agent_id=agent-1&log_page=1&log_trace_id=trace-critical-1#agent_logs');
   assert.equal(logsSection.rows[0].status.text, '内部错误');
-  assert.equal(logsSection.rows[0].severity.text, '严重');
+  assert.equal(logsSection.rows[0].severity.text, '高风险');
   assert.equal(logsSection.rows[0].duration_ms.text, '640 ms');
   assert.equal(logsSection.rows[0].span_id.text, 'span-1');
   const rawLogs = page.sections.find((section) => section.id === 'agent_raw_logs');
@@ -549,8 +554,8 @@ test('overviewPage labels risk-projected and no-risk Agent logs distinctly', () 
   const page = createViz({ traceEvents: events }).overviewPage({ agentId: 'agent-1', sort: 'severity_desc' });
   const logs = page.sections.find((section) => section.id === 'agent_logs');
 
-  assert.equal(logs.rows[0].severity.text, '严重');
-  assert.equal(logs.rows[0].severity.tone, 'critical');
+  assert.equal(logs.rows[0].severity.text, '高风险');
+  assert.equal(logs.rows[0].severity.tone, 'high');
   assert.equal(logs.rows[1].severity.text, '无风险');
   assert.equal(logs.rows[1].severity.tone, 'neutral');
 });
@@ -619,7 +624,7 @@ test('overviewPage summary always counts open findings without severity or statu
     status: 'resolved',
   });
 
-  assert.equal(page.summary_metrics.find((metric) => metric.label === '严重').value, 0);
+  assert.equal(page.summary_metrics.some((metric) => metric.label === '严重'), false);
   assert.equal(page.summary_metrics.find((metric) => metric.label === '高风险').value, 1);
   assert.equal(
     page.summary_metrics.find((metric) => metric.label === '高风险').href,
@@ -720,7 +725,7 @@ test('reviewDetailPage reads occurrence snapshots and marks repeat, escalation, 
   assert.equal(section.rows[0].occurrence_flags.text, '重复出现 · 严重级别上升 · 已解决后复发');
   assert.equal(section.rows[0].evidence_count.text, '1');
   assert.equal(page.summary_metrics.find((metric) => metric.label === '高风险').value, 1);
-  assert.equal(page.summary_metrics.find((metric) => metric.label === '严重').value, 0);
+  assert.equal(page.summary_metrics.some((metric) => metric.label === '严重'), false);
 });
 
 test('reviewDetailPage filters its queue while summary uses the unfiltered review set', () => {
@@ -737,8 +742,8 @@ test('reviewDetailPage filters its queue while summary uses the unfiltered revie
     ],
   }).reviewDetailPage('r-degraded', { severity: 'high', category: 'failed_call', status: 'resolved' });
 
-  assert.equal(page.summary_metrics.find((metric) => metric.label === '严重').value, 1);
-  assert.equal(page.summary_metrics.find((metric) => metric.label === '高风险').value, 1);
+  assert.equal(page.summary_metrics.some((metric) => metric.label === '严重'), false);
+  assert.equal(page.summary_metrics.find((metric) => metric.label === '高风险').value, 2);
   const queue = page.sections.find((section) => section.id === 'review_findings');
   assert.deepEqual(queue.rows.map((row) => row.title.text), ['Review high resolved']);
   assert.equal(page.filters.find((filter) => filter.id === 'category').value, 'failed_call');
@@ -841,7 +846,7 @@ test('findingDetailPage hides lifecycle forms while preserving occurrence/action
 
   const detail = page.sections.find((section) => section.id === 'finding_detail');
   assert.equal(detail.items.find((item) => item.label === '复发次数').value, 1);
-  assert.equal(detail.items.find((item) => item.label === '历史最高严重级别').value, '严重');
+  assert.equal(detail.items.find((item) => item.label === '历史最高严重级别').value, '高风险');
   assert.equal(detail.items.find((item) => item.label === '最近审查批次 ID').value, 'r-latest');
   assert.ok(page.sections.find((section) => section.id === 'occurrence_history'));
   assert.ok(page.sections.find((section) => section.id === 'action_history'));
@@ -1013,4 +1018,120 @@ test('visualization view models remain server-renderable data only', () => {
 
   assert.equal(payload.includes('fetch('), false);
   assert.equal(payload.includes('<script'), false);
+});
+
+function taskViz(traces, events = []) {
+  return createVisualization({
+    config: { auditReview: { visualization: { baseUrl: 'https://audit.example', dashboardPath: '/dashboard' } } },
+    traceStore: {
+      listTraces({ agentId }) { return traces.filter((trace) => trace.agent_id === agentId); },
+      getTrace(agentId, traceId) { return traces.find((trace) => trace.agent_id === agentId && trace.trace_id === traceId) ?? null; },
+      listTraceEvents({ agentId, traceId }) { return events.filter((event) => event.agent_id === agentId && event.trace_id === traceId); },
+    },
+  });
+}
+
+function task(overrides = {}) {
+  return { agent_id: 'agent/一', trace_id: 'trace?#一', requester_id: 'user-1', original_request: '检查库存',
+    sealed_at: '2026-09-14T01:00:00Z', review_version: 1, trace_status: 'success', risk_level: 'none',
+    last_event_at: '2026-09-14T01:00:00Z', context_status: 'complete', ...overrides };
+}
+
+test('task action states use seal and review axes before risk, with five fixed labels', () => {
+  const traces = [
+    task({ trace_id: 'a', sealed_at: null, risk_level: 'high' }),
+    task({ trace_id: 'b', review_version: 0, risk_level: 'unreviewed' }),
+    task({ trace_id: 'c', trace_status: 'interrupted', risk_level: 'high' }),
+    task({ trace_id: 'd', trace_status: 'incomplete', risk_level: 'low' }),
+    task({ trace_id: 'e', risk_level: 'medium' }),
+  ];
+  const page = taskViz(traces).requesterTasksPage('agent/一', 'user-1');
+  assert.deepEqual(page.sections[0].tasks.map((row) => row.state.text), ['审查中', '未审查', '需要介入', '待确认', '已完成']);
+  assert.match(page.page.subtitle, /1 条需要介入/);
+  assert.doesNotMatch(JSON.stringify(page.sections), /成功|失败|高风险|中风险|低风险|trace_status/);
+});
+
+test('requester groups search full collection, render first 20, preserve unknown identity and paginate tasks', () => {
+  const traces = Array.from({ length: 25 }, (_, index) => task({ trace_id: `t${index}`, requester_id: `u${index}`, requester_name: `姓名${index}` }));
+  traces.push(task({ trace_id: 'unknown', requester_id: null, user_id: 'must-not-be-used' }));
+  const viz = taskViz(traces);
+  const first = viz.agentPage('agent/一').sections[0];
+  assert.equal(first.groups.length, 20);
+  assert.equal(first.groups.filter((group) => group.open).length, 1);
+  assert.match(first.moreHref, /groups=40/);
+  assert.equal(viz.agentPage('agent/一', { groups: 40 }).sections[0].groups.length, 26);
+  assert.equal(viz.agentPage('agent/一', { search: '姓名24' }).sections[0].groups[0].requester_id, 'u24');
+  assert.equal(viz.agentPage('agent/一', { search: 'u24' }).sections[0].groups.length, 1);
+  assert.equal(viz.agentPage('agent/一', { search: '发起人未知' }).sections[0].groups[0].href, '/dashboard/agents/agent%2F%E4%B8%80?requester_id=');
+  const many = taskViz(Array.from({ length: 45 }, (_, index) => task({ trace_id: `t${index}` })));
+  const second = many.requesterTasksPage('agent/一', 'user-1', { page: 2 });
+  assert.equal(second.sections[0].tasks.length, 20);
+  assert.equal(second.sections[1].totalPages, 3);
+  assert.match(second.sections[1].nextHref, /page=3$/);
+  const unknown = taskViz(Array.from({ length: 25 }, (_, index) => task({ trace_id: `t${index}`, requester_id: null })));
+  assert.equal(unknown.agentPage('agent/一', { requesterId: '', page: 2 }).sections[0].tasks.length, 5);
+});
+
+test('trace detail preserves five sections and all ordered events and raw JSON across composite identities', () => {
+  const trace = task({ trace_status: 'interrupted', risk_level: 'high', review_input_sampled: 1, omitted_event_count: 10, expected_purpose: null });
+  const events = Array.from({ length: 250 }, (_, index) => ({ agent_id: trace.agent_id, trace_id: trace.trace_id,
+    id: 250 - index, ts: trace.last_event_at, event: 'tool.end', raw_json: { marker: 250 - index, text: '<script>unsafe</script>' } }));
+  events.push({ agent_id: 'other', trace_id: trace.trace_id, id: 999, raw_json: 'foreign-data' });
+  const viz = taskViz([trace, task({ agent_id: 'other' })], events);
+  const page = viz.traceDetailPage(trace.agent_id, trace.trace_id);
+  assert.deepEqual(page.sections.map((section) => section.id), ['task_conclusion', 'task_context', 'task_audit_result', 'task_evidence', 'task_raw_logs']);
+  assert.equal(page.sections[3].steps.length, 250);
+  assert.equal(page.sections[4].snippets.length, 250);
+  assert.match(page.sections[4].snippets[0].body, /"marker": 1,/);
+  assert.match(page.sections[4].snippets[249].body, /"marker": 250,/);
+  assert.equal(page.sections[1].items.find((item) => item.label === 'Agent 预期目的').value, '未提供');
+  assert.equal(viz.traceDetailPage('missing', trace.trace_id), null);
+  const html = renderDashboard(page);
+  assert.match(html, /需要人工介入/);
+  assert.match(html, /审查结论基于采样证据/);
+  assert.match(html, /<details id="task_raw_logs"[^>]*>/);
+  assert.doesNotMatch(html, /<details id="task_raw_logs"[^>]* open|foreign-data|<script>unsafe/);
+  assert.match(html, /&lt;script&gt;unsafe/);
+});
+
+test('dashboard notification links encode agent and trace independently and retain legacy review URLs', () => {
+  const viz = taskViz([]);
+  const expected = 'https://audit.example/dashboard/agents/agent%2F%E4%B8%80/traces/trace%3F%23%E4%B8%80';
+  assert.equal(viz.dashboardUrlFor('agent/一', 'trace?#一'), expected);
+  assert.equal(viz.dashboardUrlFor({ agent_id: 'agent/一', trace_id: 'trace?#一' }), expected);
+  assert.equal(viz.dashboardUrlFor('review/1'), 'https://audit.example/dashboard/audit-reviews/review%2F1');
+});
+
+test('task dashboard uses shared read service evidence and audited state from a real database', async (t) => {
+  const { openDb } = await import('../../scripts/lib/db.js');
+  const { ensureReviewSchema } = await import('../../src/db/reviewSchema.js');
+  const { readTraceDetail } = await import('../../src/auditReview/traceReadService.js');
+  const db = openDb(':memory:'); t.after(() => db.close()); ensureReviewSchema(db);
+  db.prepare(`INSERT INTO audit_traces (agent_id,trace_id,requester_id,sealed_at,review_version,trace_status,risk_level,updated_at)
+    VALUES ('a','same','u','2026-09-16',1,'success','medium','2026-09-16')`).run();
+  db.prepare(`INSERT INTO audit_events (row_hash,ts,agent_id,trace_id,span_id,event,tool_name,status,raw_json)
+    VALUES ('a','2026-09-16','a','same','s','run.final_result','shell','OK','{"nested":{"complete":true}}')`).run();
+  const viz = createVisualization({ db });
+  const page = viz.traceDetailPage('a', 'same');
+  assert.equal(page.sections[0].items.find((item) => item.label === '风险等级').value, '中风险');
+  assert.deepEqual(JSON.parse(page.sections[4].snippets[0].body), readTraceDetail(db, 'a', 'same').events[0].raw_json);
+  assert.equal(viz.agentPage('a').sections[0].groups[0].tasks[0].state.text, '已完成');
+});
+
+test('legacy critical Finding projections merge into high without mutating stored evidence', () => {
+  const stored = finding({ max_severity: 'critical' });
+  const occurrence = { ...stored, occurrence_id: 'old', observed_at: '2026-09-14', evidence_json: '[]' };
+  const viz = createViz({ store: {
+    getFinding: () => stored,
+    listReviewOccurrences: () => [occurrence],
+    listFindingOccurrences: () => [occurrence],
+  } });
+  const detail = viz.findingDetailPage(stored.finding_id);
+  assert.equal(detail.sections.find((s) => s.id === 'finding_detail').items.find((i) => i.label === '历史最高严重级别').value, '高风险');
+  const review = viz.reviewDetailPage('r-degraded', { severity: 'high' });
+  assert.equal(review.sections.find((s) => s.id === 'review_findings').rows[0].severity_label.text, '高风险');
+  assert.equal(review.sections.find((s) => s.id === 'review_findings').rows[0].severity_label.tone, 'high');
+  assert.equal(stored.severity, 'critical');
+  assert.equal(stored.max_severity, 'critical');
+  assert.equal(occurrence.severity, 'critical');
 });

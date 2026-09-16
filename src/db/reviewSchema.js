@@ -41,6 +41,27 @@ CREATE TABLE IF NOT EXISTS audit_trace_scan_cursor (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS audit_trace_notifications (
+  agent_id TEXT NOT NULL,
+  trace_id TEXT NOT NULL,
+  enqueued_at TEXT NOT NULL,
+  PRIMARY KEY (agent_id, trace_id)
+);
+
+CREATE TABLE IF NOT EXISTS audit_trace_reviews (
+  agent_id TEXT NOT NULL,
+  trace_id TEXT NOT NULL,
+  review_version INTEGER NOT NULL,
+  trace_status TEXT NOT NULL,
+  risk_level TEXT NOT NULL,
+  risk_reason TEXT,
+  evidence_event_ids TEXT,
+  input_hash TEXT,
+  reviewed_at TEXT NOT NULL,
+  PRIMARY KEY (agent_id, trace_id, review_version),
+  FOREIGN KEY (agent_id, trace_id) REFERENCES audit_traces(agent_id, trace_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS audit_review_runs (
   review_id TEXT PRIMARY KEY,
   window_from TEXT NOT NULL,
@@ -239,13 +260,16 @@ function addAuditEventColumns(db) {
   addColumnIfMissing(db, 'audit_events', 'original_request', 'TEXT');
   addColumnIfMissing(db, 'audit_events', 'agent_result', 'TEXT');
   addColumnIfMissing(db, 'audit_events', 'expected_purpose', 'TEXT');
-  addColumnIfMissing(db, 'audit_events', 'redaction_hits', 'TEXT');
-  addColumnIfMissing(db, 'audit_events', 'ingested_at', "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP");
+  addColumnIfMissing(db, 'audit_events', 'redaction_hits', 'INTEGER');
+  // SQLite cannot ALTER a populated table with a non-constant default.
+  // Historical rows deliberately retain NULL; live writers supply server time.
+  addColumnIfMissing(db, 'audit_events', 'ingested_at', 'TEXT');
   db.exec(`CREATE INDEX IF NOT EXISTS idx_audit_events_ingested ON audit_events(ingested_at, id);`);
 }
 
 function backfillAuditTraces(db) {
   if (!tableExists(db, 'audit_events')) return;
+  if (db.prepare("SELECT 1 FROM audit_trace_scan_cursor WHERE cursor_name = 'trace_aggregation'").get()) return;
   db.exec(`
     INSERT OR IGNORE INTO audit_traces (
       agent_id, trace_id, requester_id, original_request, expected_purpose, agent_result,
@@ -280,12 +304,12 @@ function backfillAuditTraces(db) {
       0,
       0,
       0,
-      MAX(ingested_at)
+      COALESCE(MAX(ingested_at), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
     FROM audit_events
+    WHERE ingested_at IS NULL
     GROUP BY agent_id, trace_id;
   `);
-  const last = db.prepare(`SELECT ingested_at, id FROM audit_events ORDER BY ingested_at DESC, id DESC LIMIT 1`).get();
-  if (last) {
+  {
     db.prepare(`
       INSERT INTO audit_trace_scan_cursor (cursor_name, last_ingested_at, last_event_id, updated_at)
       VALUES ('trace_aggregation', ?, ?, datetime('now'))
@@ -293,14 +317,14 @@ function backfillAuditTraces(db) {
         last_ingested_at = COALESCE(last_ingested_at, excluded.last_ingested_at),
         last_event_id = COALESCE(last_event_id, excluded.last_event_id),
         updated_at = excluded.updated_at
-    `).run(last.ingested_at, last.id);
+    `).run('', 0);
   }
 }
 
 export function ensureReviewSchema(db) {
   addAuditEventColumns(db);
   db.exec(REVIEW_TABLES);
-  backfillAuditTraces(db);
+  db.transaction(() => backfillAuditTraces(db)).immediate();
   addColumnIfMissing(db, 'audit_review_findings', 'entity_type', 'TEXT');
   addColumnIfMissing(db, 'audit_review_findings', 'entity_id', 'TEXT');
   addColumnIfMissing(db, 'audit_review_findings', 'llm_analysis_json', 'TEXT');

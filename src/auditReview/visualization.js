@@ -4,12 +4,25 @@
   llmUsageDayKey,
   usageWouldExceedBudget,
 } from './llmBudget.js';
+import { readTraceDetail } from './traceReadService.js';
 
 // src/auditReview/visualization.js
 // Build direct-data view models for the dashboard pages.
 // The template receives fully-populated sections (rows/items/links) - no browser-side fetch.
 
-const SEVERITY_LABELS = { critical: '严重', high: '高风险', medium: '中风险', low: '低风险' };
+const SEVERITY_LABELS = { critical: '高风险', high: '高风险', medium: '中风险', low: '低风险' };
+
+// Compatibility applies only to legacy Finding projections, never Trace conclusions.
+function findingSeverity(value) { return value === 'critical' ? 'high' : value; }
+
+function projectFinding(row) {
+  return row ? {
+    ...row,
+    raw_severity: row.raw_severity ?? row.severity,
+    severity: findingSeverity(row.severity),
+    max_severity: findingSeverity(row.max_severity),
+  } : row;
+}
 const STATUS_LABELS = {
   open: '待处理',
   acknowledged: '已确认',
@@ -198,6 +211,7 @@ function severityRank(severity) {
 }
 
 function severityTone(severity) {
+  severity = findingSeverity(severity);
   return ['critical', 'high', 'medium', 'low'].includes(severity) ? severity : 'neutral';
 }
 
@@ -503,7 +517,8 @@ function rawSnapshotSnippets(occurrences) {
 
 function occurrenceMatchesFilters(row, filters = {}) {
   if (filters.agentId && row.agent_id !== filters.agentId) return false;
-  if (filters.severity && row.severity !== filters.severity) return false;
+  if (filters.severity === 'critical' && row.raw_severity !== 'critical') return false;
+  if (filters.severity && filters.severity !== 'critical' && findingSeverity(row.severity) !== findingSeverity(filters.severity)) return false;
   if (filters.category && row.category !== filters.category) return false;
   if (filters.status && row.status !== filters.status) return false;
   return true;
@@ -524,7 +539,7 @@ function actionNotice(notice, action) {
   return [{ tone: 'critical', title: '操作未完成', body: messages[notice] ?? '处理操作时发生内部错误，请稍后重试。' }];
 }
 
-export function createVisualization({ reviewStore, config, llmClient, model } = {}) {
+export function createVisualization({ reviewStore, traceStore, db, config, llmClient, model } = {}) {
   const vizConfig = defaultVisualizationConfig(config);
   const baseUrl = vizConfig.baseUrl ?? 'http://127.0.0.1:9320';
   const dashboardPath = vizConfig.dashboardPath ?? '/dashboard';
@@ -537,8 +552,12 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
   const cacheDetailAnalysis = config?.auditReview?.llmBudget?.cacheDetailAnalysis !== false;
   const llmBudget = llmBudgetFromConfig(config);
 
-  function dashboardUrlFor(reviewId) {
-    return `${baseUrl}${dashboardPath}/audit-reviews/${encodeURIComponent(reviewId)}`;
+  function dashboardUrlFor(agentOrReviewId, traceId) {
+    if (agentOrReviewId && typeof agentOrReviewId === 'object') {
+      return `${baseUrl.replace(/\/$/, '')}${traceUrl(agentOrReviewId.agent_id, agentOrReviewId.trace_id)}`;
+    }
+    if (traceId !== undefined) return `${baseUrl.replace(/\/$/, '')}${traceUrl(agentOrReviewId, traceId)}`;
+    return `${baseUrl}${dashboardPath}/audit-reviews/${encodeURIComponent(agentOrReviewId)}`;
   }
 
   function findingUrlFor(findingId) {
@@ -596,7 +615,7 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
       {
         id: 'severity',
         label: agentLogMode ? '日志风险等级' : '严重级别',
-        values: Object.entries(SEVERITY_LABELS),
+        values: Object.entries(SEVERITY_LABELS).filter(([value]) => value !== 'critical'),
         allLabel: '全部严重级别',
       },
       {
@@ -658,7 +677,7 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
   }
 
   function agentDashboardUrl(agentId) {
-    return urlWithFilters(dashboardPath, { agentId });
+    return `${dashboardPath.replace(/\/$/, '')}/agents/${encodeURIComponent(agentId)}`;
   }
 
   function manualDailyReportPage({ status } = {}) {
@@ -720,7 +739,7 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
     try {
       for (const severity of Object.keys(counts)) {
         const rows = reviewStore.listFindings({ limit: 1000, ...filters, severity, status: 'open' });
-        counts[severity] = Array.isArray(rows) ? rows.length : 0;
+        counts[findingSeverity(severity)] += Array.isArray(rows) ? rows.length : 0;
       }
     } catch {
       // reviewStore may throw or return a non-array count; keep zero defaults.
@@ -754,7 +773,10 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
 
   function listFindings(limit = 1000, filters = {}) {
     try {
-      return reviewStore.listFindings?.({ limit, ...filters }) ?? [];
+      const rows = reviewStore.listFindings?.({ limit, ...filters }) ?? [];
+      const legacy = filters.severity === 'high'
+        ? reviewStore.listFindings?.({ limit, ...filters, severity: 'critical' }) ?? [] : [];
+      return [...new Map([...rows, ...legacy].map((row) => [row.finding_id, projectFinding(row)])).values()];
     } catch {
       return [];
     }
@@ -770,7 +792,7 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
 
   function getFinding(findingId) {
     try {
-      return reviewStore.getFinding?.(findingId) ?? null;
+      return projectFinding(reviewStore.getFinding?.(findingId)) ?? null;
     } catch {
       return null;
     }
@@ -780,7 +802,7 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
     if (typeof reviewStore.listFindingOccurrences !== 'function') return null;
     try {
       const rows = reviewStore.listFindingOccurrences({ findingId, limit });
-      return Array.isArray(rows) ? rows : [];
+      return Array.isArray(rows) ? rows.map(projectFinding) : [];
     } catch {
       return [];
     }
@@ -800,7 +822,7 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
     if (typeof reviewStore.listReviewOccurrences !== 'function') return null;
     try {
       const rows = reviewStore.listReviewOccurrences({ reviewId, limit });
-      return Array.isArray(rows) ? rows : [];
+      return Array.isArray(rows) ? rows.map(projectFinding) : [];
     } catch {
       return [];
     }
@@ -926,28 +948,12 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
   function agentIndexPage() {
     const agents = listAgents(1000);
     const updatedAt = nowIso();
-    const totalEvents = agents.reduce((sum, agent) => sum + (Number(agent?.event_count) || 0), 0);
-    const openFindings = agents.reduce((sum, agent) => sum + (Number(agent?.open_finding_count) || 0), 0);
-    const totalFindings = agents.reduce((sum, agent) => sum + (Number(agent?.finding_count) || 0), 0);
 
     const rows = agents.map((agent) => ({
       agent_id: {
         text: agent.agent_id ?? '',
         href: agent.agent_id ? agentDashboardUrl(agent.agent_id) : undefined,
-        mono: true,
-      },
-      event_count: {
-        text: String(agent.event_count ?? 0),
-        href: agent.agent_id ? agentDashboardUrl(agent.agent_id) : undefined,
-        mono: true,
-      },
-      open_finding_count: {
-        text: String(agent.open_finding_count ?? 0),
-        tone: Number(agent.open_finding_count ?? 0) > 0 ? 'high' : 'success',
-      },
-      finding_count: {
-        text: String(agent.finding_count ?? 0),
-        mono: true,
+        mono: false,
       },
       last_event_at: {
         text: formatTime(agent.last_event_at),
@@ -960,7 +966,7 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
           id: 'received_agents',
           title: '已接收日志的 Agent',
           type: 'table',
-          columns: AGENT_INDEX_COLUMNS,
+          columns: AGENT_INDEX_COLUMNS.filter((column) => ['agent_id', 'last_event_at'].includes(column.key)),
           rows,
         }]
       : [{
@@ -976,21 +982,152 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
         subtitle: '选择已接收日志的 Agent，进入对应的日志审计结果。',
         updated_at: updatedAt,
         breadcrumbs: [{ label: 'Agent 列表', href: '/' }],
-        context_badges: [
-          { label: `Agent ${agents.length}`, tone: 'neutral' },
-          { label: `待处理发现 ${openFindings}`, tone: openFindings > 0 ? 'high' : 'neutral' },
-        ],
-        page_actions: [{ label: '查看全部审计', href: dashboardPath, kind: 'secondary' }],
+        task_audit: true,
+        agent_index: true,
+        context_badges: [],
+        page_actions: [],
       },
       summary_metrics: [
         { label: 'Agent 数', value: agents.length, tone: 'neutral' },
-        { label: '接收日志', value: totalEvents, tone: 'neutral' },
-        { label: '待处理发现', value: openFindings, tone: openFindings > 0 ? 'high' : 'success' },
-        { label: '累计发现', value: totalFindings, tone: totalFindings > 0 ? 'medium' : 'neutral' },
       ],
       filters: [],
       sections,
     };
+  }
+
+  function traceUrl(agentId, traceId) {
+    return `${agentDashboardUrl(agentId)}/traces/${encodeURIComponent(traceId)}`;
+  }
+
+  function requesterUrl(agentId, requesterId) {
+    return requesterId ? `${agentDashboardUrl(agentId)}/requesters/${encodeURIComponent(requesterId)}`
+      : `${agentDashboardUrl(agentId)}?requester_id=`;
+  }
+
+  function taskState(trace) {
+    if (!trace.sealed_at) return { text: '审查中', tone: 'neutral' };
+    if (!Number(trace.review_version)) return { text: '未审查', tone: 'neutral' };
+    if (trace.risk_level === 'high') return { text: '需要介入', tone: 'high' };
+    if (trace.trace_status === 'incomplete') return { text: '待确认', tone: 'medium' };
+    return { text: '已完成', tone: 'neutral' };
+  }
+
+  function taskRows(traces) {
+    return traces.map((trace) => ({
+      href: traceUrl(trace.agent_id, trace.trace_id),
+      request: trace.original_request || '未提供原始请求',
+      trace_id: trace.trace_id,
+      time: trace.last_event_at,
+      state: taskState(trace),
+      incomplete: !trace.requester_id || trace.context_status === 'incomplete_context',
+    }));
+  }
+
+  function agentTraces(agentId) {
+    const traces = db ? db.prepare('SELECT * FROM audit_traces WHERE agent_id = ?').all(agentId)
+      : traceStore.listTraces({ agentId });
+    return traces.slice().sort((a, b) =>
+      String(b.last_event_at ?? '').localeCompare(String(a.last_event_at ?? ''))
+      || String(a.trace_id).localeCompare(String(b.trace_id)));
+  }
+
+  function taskPage(title, agentId, subtitle = '') {
+    return {
+      page: { title, subtitle, task_audit: true, updated_at: nowIso(),
+        breadcrumbs: [{ label: 'Agent', href: '/' }, { label: agentId, href: agentDashboardUrl(agentId) }] },
+      summary_metrics: [], filters: [], sections: [],
+    };
+  }
+
+  function agentPage(agentId, { search = '', groups = 20, requesterId, page: requestedPage } = {}) {
+    if (requesterId !== undefined) return requesterTasksPage(agentId, requesterId, { page: requestedPage });
+    const traces = agentTraces(agentId);
+    const grouped = new Map();
+    for (const trace of traces) {
+      const key = trace.requester_id || '';
+      if (!grouped.has(key)) grouped.set(key, { requester_id: key,
+        name: trace.requester_name || key || '发起人未知', traces: [] });
+      grouped.get(key).traces.push(trace);
+    }
+    const query = String(search).trim().toLocaleLowerCase();
+    const matches = [...grouped.values()].filter((group) =>
+      `${group.requester_id} ${group.name}`.toLocaleLowerCase().includes(query));
+    const visibleCount = Math.max(20, Number.parseInt(groups, 10) || 20);
+    const page = taskPage(agentId, agentId, `${grouped.size} 位发起人 · ${traces.length} 个任务`);
+    page.sections.push({ id: 'requester_groups', type: 'requester_groups', title: '发起用户',
+      search, action: agentDashboardUrl(agentId),
+      groups: matches.slice(0, visibleCount).map((group, index) => ({
+        ...group, traces: undefined, count: group.traces.length, time: group.traces[0].last_event_at,
+        open: index === 0, href: requesterUrl(agentId, group.requester_id),
+        tasks: taskRows(group.traces.slice(0, 20)),
+        attention: group.traces.filter((trace) => taskState(trace).text === '需要介入').length,
+      })),
+      moreHref: matches.length > visibleCount
+        ? `${agentDashboardUrl(agentId)}?${new URLSearchParams({ q: search, groups: visibleCount + 20 })}` : null,
+    });
+    return page;
+  }
+
+  function requesterTasksPage(agentId, requesterId, { page: requestedPage = 1 } = {}) {
+    const traces = agentTraces(agentId).filter((trace) => (trace.requester_id || '') === requesterId);
+    const totalPages = Math.max(1, Math.ceil(traces.length / 20));
+    const currentPage = Math.min(totalPages, Math.max(1, Number.parseInt(requestedPage, 10) || 1));
+    const attention = traces.filter((trace) => taskState(trace).text === '需要介入').length;
+    const name = traces[0]?.requester_name || requesterId || '发起人未知';
+    const page = taskPage(`${name} 的任务`, agentId, `${traces.length} 个任务 · ${attention} 条需要介入`);
+    page.page.breadcrumbs.push({ label: name, href: requesterUrl(agentId, requesterId) });
+    page.sections.push({ id: 'requester_tasks', type: 'task_list', title: `${attention} 条需要介入`,
+      tasks: taskRows(traces.slice((currentPage - 1) * 20, currentPage * 20)) });
+    const url = requesterUrl(agentId, requesterId);
+    const pageUrl = (number) => `${url}${url.includes('?') ? '&' : '?'}page=${number}`;
+    page.sections.push({ id: 'task_pagination', type: 'pagination', currentPage, totalPages,
+      previousHref: currentPage > 1 ? pageUrl(currentPage - 1) : null,
+      nextHref: currentPage < totalPages ? pageUrl(currentPage + 1) : null });
+    return page;
+  }
+
+  function traceDetailPage(agentId, traceId) {
+    const stored = db ? readTraceDetail(db, agentId, traceId) : traceStore.getTrace(agentId, traceId);
+    if (!stored) return null;
+    const trace = stored.audit_result === undefined ? stored : {
+      ...stored, trace_status: 'pending', risk_level: 'unreviewed', review_version: 0, ...stored.audit_result,
+    };
+    const events = orderedTraceEvents(trace.events ?? traceStore.listTraceEvents({ agentId, traceId }));
+    const reviewed = Number(trace.review_version) > 0;
+    const state = taskState(trace);
+    const page = taskPage('任务详情', agentId, traceId);
+    page.page.breadcrumbs.push({ label: trace.requester_id || '发起人未知', href: requesterUrl(agentId, trace.requester_id) }, { label: '任务详情' });
+    const fields = (id, title, items) => ({ id, title, type: 'definition_list', items: items.map(([label, value]) => ({ label, value: value ?? '未提供' })) });
+    page.sections = [
+      fields('task_conclusion', '任务结论', [
+        ['任务状态', state.text],
+        ['链路状态', labelOf({ pending: '尚未判定', success: '成功', failed: '失败', interrupted: '任务中断', incomplete: '链路不完整' }, trace.trace_status)],
+        ['风险等级', reviewed ? labelOf({ none: '无风险', low: '低风险', medium: '中风险', high: '高风险' }, trace.risk_level) : '未审查'],
+        ['人工介入', reviewed && trace.risk_level === 'high' ? '需要人工介入' : reviewed ? '无需人工介入' : '尚未判定'],
+      ]),
+      fields('task_context', '任务上下文', [
+        ['发起用户', trace.requester_id || '发起人未知'], ['用户原始请求', trace.original_request],
+        ['Agent 预期目的', trace.expected_purpose], ['Agent 执行结果', trace.agent_result],
+        ['上下文', !trace.requester_id || trace.context_status === 'incomplete_context' ? '上下文不完整' : trace.context_status === 'complete' ? '完整' : '未知'],
+      ]),
+      fields('task_audit_result', 'Agent 审计结果', [
+        ['审计结论', reviewed ? state.text : '未审查'], ['风险原因', trace.risk_reason],
+        ['审查批次', trace.review_id || `审查版本 ${trace.review_version || 0}`],
+        ['首次审计时间', trace.first_reviewed_at], ['最近审计时间', trace.last_reviewed_at],
+        ['证据事件 ID', Array.isArray(trace.evidence_event_ids) ? trace.evidence_event_ids.join('、') : trace.evidence_event_ids],
+        ...(trace.review_error ? [['审查提示', '最近审查失败，保留已有结论']] : []),
+        ...(trace.review_input_sampled ? [['采样说明', `该 Trace 事件过多，审查结论基于采样证据（省略 ${trace.omitted_event_count || 0} 条）；下方仍展示完整事件`]] : []),
+      ]),
+      events.length ? { id: 'task_evidence', title: `证据链（${events.length} 条事件）`, type: 'trace_sequence',
+        steps: events.map((event, index) => ({ ...traceSequenceSteps([event])[0], order: index + 1 })) }
+        : { id: 'task_evidence', title: '证据链', type: 'callout', body: '暂无事件' },
+      { id: 'task_raw_logs', title: `原始日志（${events.length} 条事件）`, type: 'raw_log_list', collapsible: true,
+        snippets: events.map((event) => ({
+          label: `事件 ID ${event.event_id ?? event.id} · ${event.ts} · ${event.event} · ${event.tool_name || '-'} · ${event.status || '-'}`,
+          body: typeof event.raw_json === 'string' ? event.raw_json : JSON.stringify(event.raw_json ?? {}, null, 2),
+        })) },
+    ];
+    return page;
   }
 
   function overviewPage({
@@ -1073,7 +1210,6 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
         });
 
     const summary_metrics = [
-      { label: SEVERITY_LABELS.critical, value: openBySev.critical, tone: 'critical', href: severityHref('critical') },
       { label: SEVERITY_LABELS.high, value: openBySev.high, tone: 'high', href: severityHref('high') },
       { label: SEVERITY_LABELS.medium, value: openBySev.medium, tone: 'medium', href: severityHref('medium') },
       { label: SEVERITY_LABELS.low, value: openBySev.low, tone: 'low', href: severityHref('low') },
@@ -1252,7 +1388,7 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
       },
       severity: {
         text: event.severity ? labelOf(SEVERITY_LABELS, event.severity) : '无风险',
-        tone: event.severity ?? 'neutral',
+        tone: severityTone(event.severity),
       },
       duration_ms: {
         text: isPresent(event.duration_ms) ? `${event.duration_ms} ms` : '',
@@ -1444,7 +1580,6 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
     });
 
     const summary_metrics = [
-      { label: SEVERITY_LABELS.critical, value: severityCounts.critical, tone: 'critical', href: severityHref('critical') },
       { label: SEVERITY_LABELS.high, value: severityCounts.high, tone: 'high', href: severityHref('high') },
       { label: SEVERITY_LABELS.medium, value: severityCounts.medium, tone: 'medium', href: severityHref('medium') },
       { label: SEVERITY_LABELS.low, value: severityCounts.low, tone: 'low', href: severityHref('low') },
@@ -1876,6 +2011,9 @@ export function createVisualization({ reviewStore, config, llmClient, model } = 
     dashboardUrlFor,
     findingUrlFor,
     agentIndexPage,
+    agentPage,
+    requesterTasksPage,
+    traceDetailPage,
     overviewPage,
     manualDailyReportPage,
     reviewDetailPage,

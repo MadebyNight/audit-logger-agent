@@ -536,3 +536,19 @@ test('renderDashboard default UI text is readable Chinese without mojibake', () 
   assert.ok(html.includes('audit-logger-agent 审计看板'));
   assert.doesNotMatch(html, /(?:涓|楂|椋|闄|浣|淇|鎴|鍏|鈥|椤|瀵|艰|埅|鐖|璋|鐩|閾|捐|矾|寤|妯|鏆|棤|鍙|睍|绀|鐧|诲|綍|璁|块|棶|浠|ょ|墝|鏇|柊|堕|棿|鎬|昏||规||澶|氭|潯|佹|嵁)/);
 });
+
+test('requester groups render accessible controls, escaped search, share links and Lucide icons', () => {
+  const html = renderDashboard({ page: { task_audit: true }, sections: [{
+    type: 'requester_groups', id: 'requester_groups', title: '发起用户', search: '"><script>bad</script>', action: '/dashboard/agents/a',
+    groups: [{ requester_id: '', name: '发起人未知', count: 1, attention: 0, time: '2026-09-16', open: true, href: '/dashboard/agents/a?requester_id=', tasks: [] }], moreHref: '/dashboard/agents/a?groups=40',
+  }] });
+  assert.match(html, /name="q" type="search"/);
+  assert.match(html, /data-group-expand="true"/);
+  assert.match(html, /data-group-expand="false"/);
+  assert.match(html, /class="requester-group" open/);
+  assert.match(html, /lucide-search/);
+  assert.match(html, /lucide-chevron-right/);
+  assert.match(html, /上下文不完整/);
+  assert.match(html, /加载更多/);
+  assert.doesNotMatch(html, /<script>bad|›|&#9654;|&rsaquo;/);
+});

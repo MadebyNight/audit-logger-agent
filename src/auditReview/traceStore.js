@@ -37,7 +37,7 @@ function finalOutcome(existing, outcome) {
     return outcome;
   }
   if (RISK_RANK[outcome.risk_level] < RISK_RANK[existing.risk_level]) {
-    return { ...outcome, risk_level: existing.risk_level };
+    return { ...outcome, risk_level: existing.risk_level, trace_status: existing.trace_status };
   }
   return outcome;
 }
@@ -58,6 +58,10 @@ export function computeInputHash(trace) {
       original_request: event.original_request,
       agent_result: event.agent_result,
       expected_purpose: event.expected_purpose,
+      span_id: event.span_id,
+      parent_span_id: event.parent_span_id,
+      duration_ms: event.duration_ms,
+      llm_intent_json: event.llm_intent_json,
     })),
   });
   return crypto.createHash('sha256').update(canonical).digest('hex');
@@ -85,10 +89,14 @@ export function createTraceStore(db) {
       context_status = excluded.context_status,
       first_event_at = excluded.first_event_at,
       last_event_at = excluded.last_event_at,
+      review_retry_count = CASE
+        WHEN audit_traces.event_count != excluded.event_count
+          OR audit_traces.ingested_watermark IS NOT excluded.ingested_watermark
+        THEN 0 ELSE audit_traces.review_retry_count END,
       ingested_watermark = excluded.ingested_watermark,
       event_count = excluded.event_count,
-      sealed_at = CASE WHEN audit_traces.sealed_reason = 'backfill' THEN audit_traces.sealed_at ELSE NULL END,
-      sealed_reason = CASE WHEN audit_traces.sealed_reason = 'backfill' THEN audit_traces.sealed_reason ELSE NULL END,
+      sealed_at = NULL,
+      sealed_reason = NULL,
       updated_at = excluded.updated_at
   `);
   const sealStmt = db.prepare(`
@@ -100,7 +108,7 @@ export function createTraceStore(db) {
     UPDATE audit_traces
     SET review_error = 1,
         review_retry_count = review_retry_count + 1,
-        risk_reason = @risk_reason,
+        risk_reason = CASE WHEN review_version = 0 THEN @risk_reason ELSE risk_reason END,
         updated_at = @updated_at
     WHERE agent_id = @agent_id AND trace_id = @trace_id
   `);
@@ -130,7 +138,7 @@ export function createTraceStore(db) {
     return getTraceStmt.get({ agent_id: agentId, trace_id: traceId }) ?? null;
   }
 
-  function applySuccessfulReview({
+  const applySuccessfulReview = db.transaction(function ({
     trace,
     outcome,
     inputHash,
@@ -146,22 +154,37 @@ export function createTraceStore(db) {
     }
     if (existing.review_error !== 1 && existing.input_hash === inputHash) return existing;
     const final = finalOutcome(existing, outcome);
+    if (!(ALLOWED_COMBINATIONS[final.trace_status] ?? []).includes(final.risk_level)) {
+      throw new Error('invalid converged trace outcome');
+    }
+    // Preserve existing conclusions as well as every subsequent revision.
+    const snapshot = db.prepare(`INSERT OR IGNORE INTO audit_trace_reviews
+      (agent_id, trace_id, review_version, trace_status, risk_level, risk_reason, evidence_event_ids, input_hash, reviewed_at)
+      SELECT agent_id, trace_id, review_version, trace_status, risk_level, risk_reason, evidence_event_ids, input_hash,
+        COALESCE(last_reviewed_at, updated_at)
+      FROM audit_traces WHERE agent_id = ? AND trace_id = ? AND review_version > 0`);
+    snapshot.run(trace.agent_id, trace.trace_id);
     applySuccessStmt.run({
       agent_id: trace.agent_id,
       trace_id: trace.trace_id,
       trace_status: final.trace_status,
       risk_level: final.risk_level,
-      risk_reason: String(outcome.risk_reason ?? '').slice(0, 200),
-      evidence_event_ids: JSON.stringify(normalizeEvidenceIds(outcome.evidence_event_ids)),
+      risk_reason: final.risk_level !== outcome.risk_level
+        ? `${existing.risk_reason ?? ''}；重审保持既有风险：${outcome.risk_reason ?? ''}`
+        : String(outcome.risk_reason ?? ''),
+      evidence_event_ids: JSON.stringify(normalizeEvidenceIds([
+        ...JSON.parse(existing.evidence_event_ids ?? '[]'), ...outcome.evidence_event_ids,
+      ])),
       input_hash: inputHash,
-      model,
-      prompt_version: promptVersion,
+      model: model ?? null,
+      prompt_version: promptVersion ?? null,
       review_input_sampled: reviewInputSampled ? 1 : 0,
       omitted_event_count: omittedEventCount,
       updated_at: nowIso(),
     });
+    snapshot.run(trace.agent_id, trace.trace_id);
     return getTrace(trace.agent_id, trace.trace_id);
-  }
+  });
 
   return {
     getTrace,
@@ -191,7 +214,7 @@ export function createTraceStore(db) {
         db.prepare(`
           UPDATE audit_traces
           SET risk_reason = @maxed_reason
-          WHERE agent_id = @agent_id AND trace_id = @trace_id AND review_retry_count >= @max_retries
+          WHERE agent_id = @agent_id AND trace_id = @trace_id AND review_retry_count >= @max_retries AND review_version = 0
         `).run({
           agent_id: agentId,
           trace_id: traceId,

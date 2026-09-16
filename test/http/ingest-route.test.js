@@ -231,9 +231,9 @@ test('POST /v1/ingest prunes audit events immediately after accepted batches', a
       span_id: 'span-prune-oldest',
     }));
     db.prepare(`INSERT INTO audit_traces (
-      agent_id, trace_id, last_event_at, sealed_at, sealed_reason, updated_at
+      agent_id, trace_id, last_event_at, sealed_at, sealed_reason, updated_at, event_count
     ) VALUES ('remote-agent', 'prune-oldest', '2026-05-01T01:00:00.000Z',
-      '2026-05-01T01:00:00.000Z', 'backfill', '2026-05-01T01:00:00.000Z')`).run();
+      '2026-05-01T01:00:00.000Z', 'backfill', '2026-05-01T01:00:00.000Z', 1)`).run();
     insertAuditEvent(db, makeEvent({
       ts: '2026-07-05T01:01:00.000Z',
       trace_id: 'prune-middle',

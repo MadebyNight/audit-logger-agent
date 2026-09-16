@@ -953,7 +953,7 @@ test('audit review HTTP integration smoke test', async () => {
       for (const [filterName, filterValue] of [
         ['agent_id', 'other-agent'],
         ['severity', 'critical'],
-        ['category', findingRecord.category === 'failed_call' ? 'high_risk_permission' : 'failed_call'],
+        ['category', 'ingest_parse_error'],
         ['status', 'resolved'],
       ]) {
         const params = new URLSearchParams({
@@ -1150,7 +1150,10 @@ test('audit review HTTP integration smoke test', async () => {
     // Sanity: the fake outbox should have captured at least 1 enqueue
     // (the summary notification for the successful run).
     // ------------------------------------------------------------------
-    assert.equal(enqueued.length, 0, 'unsealed traces and legacy Findings must not trigger Trace notifications');
+    assert.equal(enqueued.filter((item) => item.type === 'audit_review_summary').length, 1,
+      'the legacy callback summary must remain available');
+    assert.equal(enqueued.filter((item) => item.type === 'audit_trace_high_risk').length, 0,
+      'unsealed traces and legacy Findings must not trigger Trace high-risk notifications');
     // v1.5 regression: captured payloads must be generic delivery payloads
     // and must NOT carry Feishu/Bot-specific required fields. The generic
     // delivery target is the callback receiver; no bot-specific field is

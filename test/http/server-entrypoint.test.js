@@ -310,3 +310,89 @@ test('getRuntimePaths merges partial config.paths overrides with normalized defa
   assert.equal(paths.tmpDir, path.join(rootDir, 'data', 'tmp'));
   assert.equal(paths.logDir, path.join(rootDir, 'logs'));
 });
+
+
+test('real server ingests and reviews a Trace, restarts without backfill, and shuts down cleanly', { timeout: 20000 }, async () => {
+  const { fork } = await import('node:child_process');
+  const { once } = await import('node:events');
+  const net = await import('node:net');
+  const { default: Database } = await import('better-sqlite3');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-server-lifecycle-'));
+  const configPath = path.join(tmp, 'config.json');
+  const dbPath = path.join(tmp, 'audit.db');
+  const config = {
+    dbPath, agents: {}, capturesDir: path.join(tmp, 'captures'), tmpDir: path.join(tmp, 'tmp'), logDir: path.join(tmp, 'logs'),
+    ingest: { spoolDir: path.join(tmp, 'spool'), http: { enabled: true } },
+    retention: { enabled: false },
+    auditReview: { enabled: true, initialDelaySeconds: 3600, intervalMinutes: 30,
+      http: { bindHost: '127.0.0.1' }, notification: { enabled: false },
+      visualization: { baseUrl: 'http://127.0.0.1:9320' } },
+  };
+  fs.writeFileSync(configPath, JSON.stringify(config));
+  let db;
+  let child;
+  let output = '';
+  const boot = async () => {
+    const probe = net.createServer();
+    probe.listen(0, '127.0.0.1');
+    await once(probe, 'listening');
+    const port = probe.address().port;
+    await new Promise((resolve) => probe.close(resolve));
+    // IPC signal bridge lets Windows execute the real registered SIGTERM handler.
+    const bridge = 'data:text/javascript,process.on("message",m=>{if(m==="shutdown")process.emit("SIGTERM")})';
+    child = fork(path.resolve('scripts/server.js'), ['--port', String(port)], {
+      execArgv: ['--import', bridge], silent: true,
+      env: { ...process.env, AUDIT_AGENT_CONFIG_PATH: configPath,
+        AUDIT_AGENT_LLM_API_KEY: 'local-test-only', AUDIT_AGENT_LLM_MODEL: 'test-model',
+        AUDIT_AGENT_LLM_BASE_URL: 'http://127.0.0.1:1/v1', AUDIT_AGENT_DASHBOARD_TOKEN: 'test-token',
+        AUDIT_AGENT_FEISHU_MODE: 'disabled' },
+    });
+    child.stdout.on('data', (data) => { output += data; });
+    child.stderr.on('data', (data) => { output += data; });
+    const base = `http://127.0.0.1:${port}`;
+    for (let i = 0; i < 100; i++) {
+      if (child.exitCode !== null) assert.fail(output);
+      try { if ((await fetch(`${base}/health`)).ok) return base; } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.fail(`server did not start: ${output}`);
+  };
+  const stop = async () => {
+    const exited = once(child, 'exit');
+    child.send('shutdown');
+    const [code] = await exited;
+    child = null;
+    assert.equal(code, 0, output);
+  };
+  try {
+    let base = await boot();
+    const ts = new Date().toISOString();
+    const event = { ts, agent_id: 'lifecycle-agent', trace_id: 'lifecycle-trace', span_id: 's',
+      tool_name: 'task', status: 'OK', result_summary: 'done', event: 'run.final_result', agent_result: 'done' };
+    const response = await fetch(`${base}/v1/ingest`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ events: [event] }) });
+    const accepted = await response.json();
+    assert.equal(response.status, 202, JSON.stringify(accepted));
+    assert.equal(accepted.accepted, 1, JSON.stringify(accepted));
+    const manual = await fetch(`${base}/v1/audit-reviews/run`, { method: 'POST', headers: { authorization: 'Bearer test-token' } });
+    assert.equal(manual.status, 202, await manual.text());
+    await stop();
+    db = new Database(dbPath);
+    const first = db.prepare("SELECT * FROM audit_traces WHERE agent_id = 'lifecycle-agent'").get();
+    assert.ok(first, JSON.stringify({ events: db.prepare('SELECT agent_id, trace_id, ingested_at FROM audit_events').all(), runs: db.prepare('SELECT * FROM audit_review_runs').all(), output }));
+    assert.equal(first.risk_level, 'none');
+    assert.equal(first.review_version, 1);
+    assert.equal(db.prepare('SELECT COUNT(*) n FROM audit_review_locks').get().n, 0);
+    db.close();
+    base = await boot();
+    assert.equal((await fetch(`${base}/health`)).status, 200);
+    await stop();
+    db = new Database(dbPath);
+    assert.equal(db.prepare("SELECT review_version FROM audit_traces WHERE agent_id = 'lifecycle-agent'").get().review_version, 1);
+    db.close();
+    assert.doesNotMatch(output, /database connection is not open|Trace aggregation failed|Graceful shutdown .*failed/);
+  } finally {
+    if (child) { const exited = once(child, 'exit'); child.kill(); await exited; }
+    if (db?.open) db.close();
+    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  }
+});
