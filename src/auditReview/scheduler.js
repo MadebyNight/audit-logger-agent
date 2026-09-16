@@ -1,4 +1,4 @@
-﻿// src/auditReview/scheduler.js
+// src/auditReview/scheduler.js
 //
 // Audit review orchestration scheduler for v1.4.
 // See v1.4 PERIODIC_LLM_AUDIT_REVIEW_DESIGN.md sections 4, 9.5, 12.5, 14.
@@ -11,6 +11,8 @@
 //   - Emit runtime audit events for every lifecycle step (agent_id='audit-logger-agent').
 
 import crypto from 'crypto';
+import { createTraceStore } from './traceStore.js';
+import { createTraceAggregator } from './traceAggregator.js';
 import { agentDisplayName, buildEvidenceDetail, buildEvidenceIndex, evidenceForEventIds } from './evidence.js';
 import { estimateTokensForPayload, llmBudgetFromConfig, usageWouldExceedBudget } from './llmBudget.js';
 
@@ -283,6 +285,7 @@ export function createAuditReviewScheduler({
   cursorStore,
   detector,
   llmReviewer,
+  traceAggregator: traceAggregatorOpt,
   toolSemanticMapper,
   notifier,
   visualization,
@@ -306,6 +309,15 @@ export function createAuditReviewScheduler({
   if (!notifier) throw new Error('createAuditReviewScheduler: notifier is required');
   if (!visualization) throw new Error('createAuditReviewScheduler: visualization is required');
   if (!auditLogger) throw new Error('createAuditReviewScheduler: auditLogger is required');
+  const traceStore = createTraceStore(db);
+  const traceAggregator = traceAggregatorOpt ?? createTraceAggregator({
+    db,
+    config,
+    traceStore,
+    llmReviewer,
+    lockStore,
+    now,
+  });
 
   const auditConfig = config.auditReview ?? {};
   // Evidence helpers expect a config object with an `agents` map at its top
@@ -541,6 +553,24 @@ export function createAuditReviewScheduler({
         clearRefreshTimer();
         try { lockStore.release({ lockName: LOCK_NAME, ownerId }); } catch {}
         return { reviewId, status: 'failed' };
+      }
+
+      // 5a. Aggregate and review sealed traces.
+      try {
+        const traceResult = await traceAggregator.run();
+        logAudit(
+          'review.trace_aggregation.completed',
+          'OK',
+          `Trace aggregation: scanned=${traceResult.scannedEvents}, updated=${traceResult.updatedTraces}, reviewed=${traceResult.reviewedTraces}.`,
+          'audit.trace',
+        );
+      } catch (err) {
+        logAudit(
+          'review.trace_aggregation.completed',
+          'INTERNAL',
+          `Trace aggregation failed: ${err.message}`,
+          'audit.trace',
+        );
       }
 
       // 6. Detect candidates.
