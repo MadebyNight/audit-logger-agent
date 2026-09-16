@@ -6,7 +6,7 @@ import path from 'path';
 
 import { normalizeEventId } from '../scripts/lib/auditSpec.js';
 import { openDb, insertEvents, queryEvents } from '../scripts/lib/db.js';
-import { normalizeEntry, parseNdjson } from '../scripts/lib/parser.js';
+import { normalizeEntry, parseNdjson, validateLogEntry } from '../scripts/lib/parser.js';
 
 function validEntry(overrides = {}) {
   return {
@@ -23,8 +23,17 @@ function validEntry(overrides = {}) {
   };
 }
 
-function parseOne(entry) {
-  return parseNdjson(`${JSON.stringify(entry)}\n`);
+function parseOne(entry, options) {
+  return parseNdjson(`${JSON.stringify(entry)}\n`, options);
+}
+
+function validationErrors(entry, options) {
+  return validateLogEntry(entry, 1, options);
+}
+
+function assertErrorCode(errors, code, field) {
+  const error = errors.find((item) => item.code === code && item.field === field);
+  assert.ok(error, `missing ${code} ${field}: ${JSON.stringify(errors)}`);
 }
 
 test('normalizeEventId maps known aliases to canonical event ids only', () => {
@@ -163,6 +172,47 @@ test('insertEvents stores entity and llm_intent columns and queryEvents filters 
   }
 });
 
+test('insertEvents stores task-level fields and missing fields remain null', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-task-fields-db-'));
+  const db = openDb(path.join(tmpDir, 'audit.db'));
+  try {
+    const complete = normalizeEntry(validEntry({
+      trace_id: 'trace-task-complete',
+      event: 'run.start',
+      requester_id: 'user-1',
+      original_request: 'summarize report',
+      expected_purpose: 'review summary quality',
+      agent_result: 'summary delivered',
+    }));
+
+    const missing = normalizeEntry(validEntry({
+      trace_id: 'trace-task-missing',
+      span_id: 'span-task-missing',
+    }));
+
+    assert.equal(insertEvents(db, [complete, missing]), 2);
+
+    const stored = queryEvents(db, { trace_id: 'trace-task-complete' })[0];
+    assert.equal(stored.requester_id, 'user-1');
+    assert.equal(stored.original_request, 'summarize report');
+    assert.equal(stored.expected_purpose, 'review summary quality');
+    assert.equal(stored.agent_result, 'summary delivered');
+
+    const empty = queryEvents(db, { trace_id: 'trace-task-missing' })[0];
+    assert.equal(empty.requester_id, null);
+    assert.equal(empty.original_request, null);
+    assert.equal(empty.expected_purpose, null);
+    assert.equal(empty.agent_result, null);
+
+    const columns = db.prepare('PRAGMA table_info(audit_events)').all().map((column) => column.name);
+    for (const column of ['requester_id', 'original_request', 'expected_purpose', 'agent_result']) {
+      assert.ok(columns.includes(column), `${column} should exist`);
+    }
+  } finally {
+    db.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
 test('queryEvents filters by mapped tool type and mapping status', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-mapping-query-db-'));
   const db = openDb(path.join(tmpDir, 'audit.db'));
@@ -246,5 +296,51 @@ test('openDb migrates legacy audit_events before creating entity index', () => {
   } finally {
     db.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('task fields enforce event-specific required rules by ingest mode', () => {
+  const runStart = validEntry({ event: 'run.start' });
+
+  const compat = parseOne(runStart, { mode: 'compat' });
+  assert.deepEqual(compat.errors, []);
+  assert.equal(compat.entries.length, 1);
+
+  const strict = parseOne(runStart, { mode: 'strict' });
+  assert.equal(strict.entries.length, 0);
+  assertErrorCode(strict.errors, 'missing_required_task_field', 'requester_id');
+  assertErrorCode(strict.errors, 'missing_required_task_field', 'original_request');
+
+  const completeRunStart = { ...runStart, requester_id: 'user-1', original_request: 'summarize report' };
+  assert.deepEqual(parseOne({ ...completeRunStart, expected_purpose: '' }, { mode: 'strict' }).errors, []);
+  assert.deepEqual(parseOne({ ...completeRunStart, expected_purpose: undefined }, { mode: 'strict' }).errors, []);
+
+  for (const event of ['run.final_result', 'run.failed']) {
+    const errors = validationErrors(validEntry({ event, agent_result: undefined }), { mode: 'strict' });
+    assertErrorCode(errors, 'missing_required_task_field', 'agent_result');
+  }
+});
+
+test('task fields enforce type and length rules in both ingest modes', () => {
+  const base = validEntry({ event: 'run.start', requester_id: 'user-1', original_request: 'summarize report' });
+  const typeErrors = validationErrors({ ...base, requester_id: {} });
+  assertErrorCode(typeErrors, 'invalid_field_type', 'requester_id');
+
+  const lengths = {
+    requester_id: 128,
+    original_request: 2000,
+    expected_purpose: 1000,
+    agent_result: 2000,
+  };
+  for (const mode of ['compat', 'strict']) {
+    const options = { mode };
+    for (const [field, maxLength] of Object.entries(lengths)) {
+      assert.deepEqual(validationErrors({ ...base, [field]: 'x'.repeat(maxLength) }, options), []);
+      assertErrorCode(
+        validationErrors({ ...base, [field]: 'x'.repeat(maxLength + 1) }, options),
+        'field_too_long',
+        field,
+      );
+    }
   }
 });

@@ -1,6 +1,8 @@
 import {
   CANONICAL_STATUS_CODES,
+  EVENT_REQUIRED_TASK_FIELDS,
   REQUIRED_FIELDS,
+  TASK_FIELDS,
   isCanonicalStatus,
   normalizeEventId,
 } from './auditSpec.js';
@@ -15,7 +17,7 @@ function isBlankOptional(value) {
   return value == null || value === '';
 }
 
-export function validateLogEntry(entry, lineNumber) {
+export function validateLogEntry(entry, lineNumber, options = {}) {
   const errors = [];
 
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
@@ -90,6 +92,30 @@ export function validateLogEntry(entry, lineNumber) {
     }
   }
 
+  const canonicalEvent = normalizeEventId(entry.event);
+  for (const [field, rule] of Object.entries(TASK_FIELDS)) {
+    const value = entry[field];
+    if (isBlankOptional(value)) continue;
+
+    if (typeof value !== rule.type) {
+      errors.push({ code: 'invalid_field_type', field, message: `line ${lineNumber}: ${field} must be a string when present` });
+      continue;
+    }
+
+    if (value.length > rule.maxLength) {
+      errors.push({ code: 'field_too_long', field, message: `line ${lineNumber}: ${field} exceeds ${rule.maxLength} chars (${value.length})` });
+    }
+  }
+
+  if (options.mode === 'strict' && canonicalEvent) {
+    const requiredFields = EVENT_REQUIRED_TASK_FIELDS[canonicalEvent] ?? [];
+    for (const field of requiredFields) {
+      if (isBlankOptional(entry[field])) {
+        errors.push({ code: 'missing_required_task_field', field, message: `line ${lineNumber}: missing required field "${field}"` });
+      }
+    }
+  }
+
   if (entry.tags && !Array.isArray(entry.tags)) {
     errors.push(`line ${lineNumber}: tags must be an array`);
   }
@@ -114,7 +140,7 @@ export function parseNdjson(content, options = {}) {
     }
     try {
       const entry = JSON.parse(line);
-      const validationErrors = validateLogEntry(entry, lineNumber);
+      const validationErrors = validateLogEntry(entry, lineNumber, options);
       if (validationErrors.length > 0) {
         errors.push(...validationErrors);
         continue;
@@ -145,6 +171,10 @@ export function normalizeEntry(entry) {
     duration_ms: entry.duration_ms ?? null,
     channel: entry.channel || null,
     user_id: entry.user_id === '' ? null : (entry.user_id ?? null),
+    requester_id: entry.requester_id === '' ? null : (entry.requester_id ?? null),
+    original_request: entry.original_request === '' ? null : (entry.original_request ?? null),
+    agent_result: entry.agent_result === '' ? null : (entry.agent_result ?? null),
+    expected_purpose: entry.expected_purpose === '' ? null : (entry.expected_purpose ?? null),
     entity_type: entity?.type ?? null,
     entity_id: entity?.id ?? null,
     llm_intent_json: entry.llm_intent ? JSON.stringify(entry.llm_intent) : null,

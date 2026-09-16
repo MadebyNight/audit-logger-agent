@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { normalizeEntry, validateLogEntry } from '../../../scripts/lib/parser.js';
+import { EVENT_REQUIRED_TASK_FIELDS, TASK_FIELDS, normalizeEventId } from '../../../scripts/lib/auditSpec.js';
 import { insertEvents } from '../../../scripts/lib/db.js';
 import { getRuntimePaths } from '../../app/paths.js';
 
@@ -27,6 +28,12 @@ function maxBodyBytes(config) {
 
 function maxLineBytes(config) {
   return config.ingest?.http?.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES;
+}
+
+function resolveIngestMode(config, agentId) {
+  const configuredMode = config.agents?.[agentId]?.ingestMode;
+  if (configuredMode === 'strict' || configuredMode === 'compat') return configuredMode;
+  return config.ingest?.defaultMode === 'strict' ? 'strict' : 'compat';
 }
 
 export function isHttpIngestEnabled(config = {}) {
@@ -103,7 +110,52 @@ function parseNdjsonBody(raw, lineLimitBytes) {
   return { events, errors };
 }
 
-function validateEvent(event, index, lineLimitBytes) {
+function validateTaskFields(event, index, ingestMode) {
+  const errors = [];
+
+  for (const [field, rule] of Object.entries(TASK_FIELDS)) {
+    const value = event[field];
+    if (value == null || value === '') continue;
+    if (typeof value !== rule.type) {
+      errors.push({
+        index,
+        field,
+        trace_id: event.trace_id,
+        error_code: 'invalid_field_type',
+        error: `${field} must be a string`,
+      });
+      continue;
+    }
+    if (value.length > rule.maxLength) {
+      errors.push({
+        index,
+        field,
+        trace_id: event.trace_id,
+        error_code: 'field_too_long',
+        error: `${field} exceeds ${rule.maxLength} chars (${value.length})`,
+      });
+    }
+  }
+
+  if (ingestMode !== 'strict') return errors;
+
+  const canonicalEvent = normalizeEventId(event.event);
+  const requiredFields = canonicalEvent ? EVENT_REQUIRED_TASK_FIELDS[canonicalEvent] ?? [] : [];
+  for (const field of requiredFields) {
+    if (event[field] == null || event[field] === '') {
+      errors.push({
+        index,
+        field,
+        trace_id: event.trace_id,
+        error_code: 'missing_required_task_field',
+        error: `${field} is required for ${canonicalEvent}`,
+      });
+    }
+  }
+  return errors;
+}
+
+function validateEvent(event, index, lineLimitBytes, ingestMode) {
   const errors = [];
   if (!event || typeof event !== 'object' || Array.isArray(event)) {
     return {
@@ -124,6 +176,11 @@ function validateEvent(event, index, lineLimitBytes) {
   const validationErrors = validateLogEntry(event, index + 1);
   for (const error of validationErrors) {
     errors.push({ index, error });
+  }
+
+  const taskFieldErrors = validateTaskFields(event, index, ingestMode);
+  if (taskFieldErrors.length > 0) {
+    return { errors: taskFieldErrors, normalizedEvent: null };
   }
 
   return { errors, normalizedEvent: event };
@@ -176,10 +233,21 @@ export async function handleIngestRoute(req, res, { config = {}, db, toolSemanti
   const accepted = [];
   const rejectedIndexes = new Set(errors.map((error) => error.index));
   for (const item of events) {
-    const { errors: eventErrors, normalizedEvent } = validateEvent(item.event, item.index, lineLimitBytes);
+    const ingestMode = resolveIngestMode(config, item.event?.agent_id);
+    const { errors: eventErrors, normalizedEvent } = validateEvent(item.event, item.index, lineLimitBytes, ingestMode);
     if (eventErrors.length > 0) {
       errors.push(...eventErrors);
       rejectedIndexes.add(item.index);
+      if (eventErrors.some((error) => error.error_code)) {
+        const error = eventErrors.find((candidate) => candidate.error_code);
+        json(res, 400, {
+          accepted: 0,
+          rejected: rejectedIndexes.size,
+          trace_id: error.trace_id,
+          errors: eventErrors,
+        });
+        return;
+      }
       continue;
     }
     accepted.push({ originalEvent: item.event, normalizedEvent });

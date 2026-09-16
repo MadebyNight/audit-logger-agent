@@ -67,6 +67,10 @@ function openDbSchemaOnly(db) {
       duration_ms INTEGER,
       channel TEXT,
       user_id TEXT,
+      requester_id TEXT,
+      original_request TEXT,
+      agent_result TEXT,
+      expected_purpose TEXT,
       entity_type TEXT,
       entity_id TEXT,
       llm_intent_json TEXT,
@@ -190,6 +194,36 @@ test('ingestSince: incremental append only reads new complete line, holds back p
   }
 });
 
+test('ingestSince: events without task fields remain compatible as null values', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-ingest-legacy-fields-'));
+  try {
+    const logDir = path.join(tmpDir, 'incoming', 'test-agent');
+    fs.mkdirSync(logDir, { recursive: true });
+    const logFile = path.join(logDir, 'audit-2026-07-03.jsonl');
+    fs.writeFileSync(logFile, makeLine({ trace_id: 'legacy-fields', span_id: 's1' }) + '\n', 'utf-8');
+
+    const dbPath = path.join(tmpDir, 'audit.db');
+    const db = makeDb();
+    const cursorStore = createIngestCursorStore(db);
+    const svc = createAuditIngestService({ db, config: makeConfig(logDir, dbPath), cursorStore });
+
+    const result = svc.ingestSince({ sinceDate: '2026-07-03' });
+    assert.equal(result.inserted, 1);
+
+    const stored = db.prepare(`
+      SELECT requester_id, original_request, agent_result, expected_purpose
+      FROM audit_events
+      WHERE trace_id = 'legacy-fields'
+    `).get();
+    assert.equal(stored.requester_id, null);
+    assert.equal(stored.original_request, null);
+    assert.equal(stored.agent_result, null);
+    assert.equal(stored.expected_purpose, null);
+    db.close();
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
 test('ingestSince: missing log directory is skipped without throwing', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-ingest-missing-'));
   try {

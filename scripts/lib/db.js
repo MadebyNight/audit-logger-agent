@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS audit_events (
   duration_ms INTEGER,
   channel TEXT,
   user_id TEXT,
+  requester_id TEXT,
+  original_request TEXT,
+  agent_result TEXT,
+  expected_purpose TEXT,
   entity_type TEXT,
   entity_id TEXT,
   llm_intent_json TEXT,
@@ -123,6 +127,10 @@ function addColumnIfMissing(db, table, column, definition) {
 }
 
 function migrateAuditEvents(db) {
+  addColumnIfMissing(db, 'audit_events', 'requester_id', 'TEXT');
+  addColumnIfMissing(db, 'audit_events', 'original_request', 'TEXT');
+  addColumnIfMissing(db, 'audit_events', 'agent_result', 'TEXT');
+  addColumnIfMissing(db, 'audit_events', 'expected_purpose', 'TEXT');
   addColumnIfMissing(db, 'audit_events', 'entity_type', 'TEXT');
   addColumnIfMissing(db, 'audit_events', 'entity_id', 'TEXT');
   addColumnIfMissing(db, 'audit_events', 'llm_intent_json', 'TEXT');
@@ -152,6 +160,10 @@ export function insertEvents(db, events) {
     'duration_ms',
     'channel',
     'user_id',
+    'requester_id',
+    'original_request',
+    'agent_result',
+    'expected_purpose',
     'entity_type',
     'entity_id',
     'llm_intent_json',
@@ -178,6 +190,10 @@ export function insertEvents(db, events) {
     for (const row of rows) {
       const rowHash = hashRow(row.raw_json);
       const values = {
+        requester_id: null,
+        original_request: null,
+        agent_result: null,
+        expected_purpose: null,
         entity_type: null,
         entity_id: null,
         llm_intent_json: null,

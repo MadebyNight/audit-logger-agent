@@ -447,6 +447,137 @@ test('POST /v1/ingest rejects path-special agent_id values without writing spool
   }
 });
 
+test('POST /v1/ingest applies strict task-field requirements per agent', async () => {
+  await withIngestServer(async ({ baseUrl, config, db }) => {
+    const strictEvent = makeEvent({
+      agent_id: 'strict-agent',
+      event: 'run.start',
+      span_id: 'strict-start',
+    });
+    const response = await fetch(`${baseUrl}/v1/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(strictEvent),
+    });
+
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.equal(body.errors[0].error_code, 'missing_required_task_field');
+    assert.equal(body.trace_id, 'trace-1');
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS count FROM audit_events WHERE trace_id = ?').get('trace-1').count,
+      0
+    );
+
+    const compatEvent = makeEvent({
+      agent_id: 'compat-agent',
+      event: 'run.start',
+      trace_id: 'compat-trace',
+      span_id: 'compat-start',
+    });
+    const compatResponse = await fetch(`${baseUrl}/v1/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(compatEvent),
+    });
+
+    assert.equal(compatResponse.status, 202);
+    assert.match(readSpool(config, 'compat-agent'), /compat-trace/);
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS count FROM audit_events WHERE trace_id = ?').get('compat-trace').count,
+      1
+    );
+  }, {
+    agents: {
+      'strict-agent': { ingestMode: 'strict' },
+    },
+  });
+});
+
+test('POST /v1/ingest accepts strict run.start without optional expected_purpose', async () => {
+  await withIngestServer(async ({ baseUrl, config }) => {
+    const event = makeEvent({
+      agent_id: 'strict-agent',
+      event: 'run.start',
+      requester_id: 'user-1',
+      original_request: 'Deploy service',
+      trace_id: 'strict-complete',
+      span_id: 'strict-complete',
+    });
+    const response = await fetch(`${baseUrl}/v1/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(event),
+    });
+
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { accepted: 1, rejected: 0, errors: [] });
+    assert.match(readSpool(config, 'strict-agent'), /strict-complete/);
+  }, {
+    agents: { 'strict-agent': { ingestMode: 'strict' } },
+  });
+});
+
+test('POST /v1/ingest rejects task-field type and length errors in both modes', async () => {
+  const cases = [
+    {
+      overrides: { requester_id: { user: 'id' } },
+      expectedError: 'invalid_field_type',
+    },
+    {
+      overrides: { requester_id: 'x'.repeat(129) },
+      expectedError: 'field_too_long',
+    },
+  ];
+
+  for (const mode of ['compat', 'strict']) {
+    for (const item of cases) {
+      await withIngestServer(async ({ baseUrl, db }) => {
+        const response = await fetch(`${baseUrl}/v1/ingest`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(makeEvent({
+            agent_id: `${mode}-agent`,
+            event: 'run.start',
+            requester_id: 'user-1',
+            original_request: 'valid request',
+            ...item.overrides,
+          })),
+        });
+
+        assert.equal(response.status, 400);
+        const body = await response.json();
+        assert.equal(body.errors[0].error_code, item.expectedError);
+        assert.equal(
+          db.prepare('SELECT COUNT(*) AS count FROM audit_events WHERE trace_id = ?').get('trace-1').count,
+          0
+        );
+      }, {
+        agents: { [`${mode}-agent`]: { ingestMode: mode } },
+      });
+    }
+  }
+});
+
+test('POST /v1/ingest preserves oversized body 413 response', async () => {
+  await withIngestServer(async ({ baseUrl, config }) => {
+    const response = await fetch(`${baseUrl}/v1/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(makeEvent({ result_summary: 'x'.repeat(600) })),
+    });
+
+    assert.equal(response.status, 413);
+    const body = await response.json();
+    assert.equal(body.error_code, 'payload_too_large');
+    assert.equal(fs.existsSync(config.ingest.spoolDir), false);
+  }, {
+    ingest: {
+      http: { enabled: true, maxBodyBytes: 300, maxLineBytes: 512 },
+      spoolDir: path.join(os.tmpdir(), `audit-http-ingest-payload-${Date.now()}`),
+    },
+  });
+});
 test('POST /v1/ingest returns 413 for oversized bodies', async () => {
   await withIngestServer(async ({ baseUrl, config }) => {
     const response = await fetch(`${baseUrl}/v1/ingest`, {

@@ -9,6 +9,19 @@ export const REQUIRED_FIELDS = [
   'result_summary',
 ];
 
+export const TASK_FIELDS = Object.freeze({
+  requester_id: { type: 'string', maxLength: 128 },
+  original_request: { type: 'string', maxLength: 2000 },
+  expected_purpose: { type: 'string', maxLength: 1000 },
+  agent_result: { type: 'string', maxLength: 2000 },
+});
+
+export const EVENT_REQUIRED_TASK_FIELDS = Object.freeze({
+  'run.start': ['requester_id', 'original_request'],
+  'run.final_result': ['agent_result'],
+  'run.failed': ['agent_result'],
+});
+
 export const EVENT_STAGE_MAP = Object.freeze({
   'tool.start': { process: 'tool', stage: 'start' },
   'tool.end': { process: 'tool', stage: 'end' },
