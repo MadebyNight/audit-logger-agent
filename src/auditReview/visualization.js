@@ -87,9 +87,8 @@ const REVIEWS_TABLE_COLUMNS = [
 
 const AGENT_INDEX_COLUMNS = [
   { key: 'agent_id', label: 'Agent ID', priority: 'primary' },
-  { key: 'event_count', label: '接收日志数', priority: 'secondary' },
-  { key: 'open_finding_count', label: '待处理发现', priority: 'primary' },
-  { key: 'finding_count', label: '累计发现', priority: 'metadata' },
+  { key: 'requester_count', label: '发起人数', priority: 'primary' },
+  { key: 'task_count', label: '任务数', priority: 'primary' },
   { key: 'last_event_at', label: '最新日志时间', priority: 'secondary' },
 ];
 
@@ -196,8 +195,44 @@ function isPresent(value) {
   return value !== '' && value !== null && value !== undefined;
 }
 
+function pickLatestTime(a, b) {
+  if (!a) return b ?? null;
+  if (!b) return a ?? null;
+  const timeA = Date.parse(a);
+  const timeB = Date.parse(b);
+  if (Number.isNaN(timeA)) return b;
+  if (Number.isNaN(timeB)) return a;
+  return timeA >= timeB ? a : b;
+}
+
 function formatTime(iso) {
   return iso ? String(iso) : '';
+}
+
+export function formatRelativeTime(iso, now = Date.now()) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const base = new Date(now);
+  const targetMidnight = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const baseMidnight = new Date(base.getFullYear(), base.getMonth(), base.getDate()).getTime();
+  const diffDays = Math.round((baseMidnight - targetMidnight) / (24 * 60 * 60 * 1000));
+
+  if (diffDays <= 0) {
+    const hours = String(d.getHours()).padStart(2, '0');
+    const minutes = String(d.getMinutes()).padStart(2, '0');
+    return `${hours}:${minutes}`;
+  }
+  if (diffDays === 1) {
+    return '昨天';
+  }
+  if (diffDays >= 2 && diffDays <= 6) {
+    return `${diffDays} 天前`;
+  }
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 function severityRank(severity) {
@@ -945,28 +980,56 @@ export function createVisualization({ reviewStore, traceStore, db, config, llmCl
       }));
   }
 
-  function agentIndexPage() {
+  function agentIndexPage({ now = Date.now() } = {}) {
     const agents = listAgents(1000);
     const updatedAt = nowIso();
 
-    const rows = agents.map((agent) => ({
-      agent_id: {
-        text: agent.agent_id ?? '',
-        href: agent.agent_id ? agentDashboardUrl(agent.agent_id) : undefined,
-        mono: false,
-      },
-      last_event_at: {
-        text: formatTime(agent.last_event_at),
-        mono: true,
-      },
-    }));
+    const rows = agents.map((agent) => {
+      const agentId = agent.agent_id ?? '';
+      const traces = agentId ? agentTraces(agentId) : [];
+      const taskCount = traces.length;
+
+      let requesterCount = 0;
+      if (traces.length > 0) {
+        const requesterKeys = new Set();
+        for (const trace of traces) {
+          requesterKeys.add(trace.requester_id || '');
+        }
+        requesterCount = requesterKeys.size;
+      }
+
+      const lastEventAt = pickLatestTime(agent.last_event_at, traces[0]?.last_event_at);
+      const formattedLastEventAt = formatTime(lastEventAt);
+      const relativeTime = formatRelativeTime(lastEventAt, now);
+
+      const agentHref = agentId ? agentDashboardUrl(agentId) : undefined;
+
+      return {
+        agent_id: {
+          text: agentId,
+          href: agentHref,
+          mono: false,
+        },
+        name: agent.agent_name || agentId,
+        href: agentHref,
+        requester_count: requesterCount,
+        task_count: taskCount,
+        last_event_at: {
+          text: relativeTime,
+          raw: formattedLastEventAt,
+          mono: true,
+          toString() { return this.text; },
+        },
+        time: relativeTime,
+      };
+    });
 
     const sections = rows.length > 0
       ? [{
           id: 'received_agents',
           title: '已接收日志的 Agent',
           type: 'table',
-          columns: AGENT_INDEX_COLUMNS.filter((column) => ['agent_id', 'last_event_at'].includes(column.key)),
+          columns: AGENT_INDEX_COLUMNS,
           rows,
         }]
       : [{
@@ -987,9 +1050,7 @@ export function createVisualization({ reviewStore, traceStore, db, config, llmCl
         context_badges: [],
         page_actions: [],
       },
-      summary_metrics: [
-        { label: 'Agent 数', value: agents.length, tone: 'neutral' },
-      ],
+      summary_metrics: [],
       filters: [],
       sections,
     };
@@ -1024,11 +1085,19 @@ export function createVisualization({ reviewStore, traceStore, db, config, llmCl
   }
 
   function agentTraces(agentId) {
-    const traces = db ? db.prepare('SELECT * FROM audit_traces WHERE agent_id = ?').all(agentId)
-      : traceStore.listTraces({ agentId });
-    return traces.slice().sort((a, b) =>
-      String(b.last_event_at ?? '').localeCompare(String(a.last_event_at ?? ''))
-      || String(a.trace_id).localeCompare(String(b.trace_id)));
+    try {
+      let traces = [];
+      if (db) {
+        traces = db.prepare('SELECT * FROM audit_traces WHERE agent_id = ?').all(agentId);
+      } else if (traceStore && typeof traceStore.listTraces === 'function') {
+        traces = traceStore.listTraces({ agentId });
+      }
+      return Array.isArray(traces) ? traces.slice().sort((a, b) =>
+        String(b.last_event_at ?? '').localeCompare(String(a.last_event_at ?? ''))
+        || String(a.trace_id).localeCompare(String(b.trace_id))) : [];
+    } catch {
+      return [];
+    }
   }
 
   function taskPage(title, agentId, subtitle = '') {

@@ -32,7 +32,7 @@ function visibleMetrics(metrics = []) {
 function visibleSections(sections = []) {
   return sections.filter((section) => {
     if (['requester_groups', 'task_list'].includes(section.type)) return true;
-    if (section.type === 'table') return Array.isArray(section.rows) && section.rows.length > 0;
+    if (['table', 'agent_rows'].includes(section.type)) return Array.isArray(section.rows) && section.rows.length > 0;
     if (section.type === 'definition_list') return Array.isArray(section.items) && section.items.some((item) => hasValue(item.value));
     if (section.type === 'link_list') return Array.isArray(section.links) && section.links.length > 0;
     if (section.type === 'pagination') return Number(section.totalPages) > 1;
@@ -152,8 +152,11 @@ function renderSummaryMetric(metric) {
   return cardContent;
 }
 
-function renderSummaryMetrics(metrics) {
-  const visible = visibleMetrics(metrics);
+function renderSummaryMetrics(metrics, page = {}) {
+  let visible = visibleMetrics(metrics);
+  if (page?.agent_index) {
+    visible = visible.filter((metric) => metric.label !== 'Agent 数');
+  }
   if (!Array.isArray(visible) || visible.length === 0) return '';
   return `<section class="summary-metrics" aria-label="概要指标">${visible.map(renderSummaryMetric).join('\n')}</section>`;
 }
@@ -505,12 +508,114 @@ function renderRequesterGroups(section) {
     ${section.moreHref ? `<a class="load-more" href="${escapeHtml(section.moreHref)}">加载更多</a>` : ''}` });
 }
 
-function renderSection(section) {
+function formatUnitCount(value, unit, fallback = `0 ${unit}`) {
+  if (value === null || value === undefined || value === '') {
+    return fallback;
+  }
+  const str = String(value).trim();
+  if (str.endsWith(unit)) return str;
+  return `${str} ${unit}`;
+}
+
+function renderAgentRow(row) {
+  if (!row || typeof row !== 'object') return '';
+
+  let name = '';
+  let href = '';
+
+  if (hasValue(row.name)) {
+    if (typeof row.name === 'object') {
+      name = row.name.text ?? '';
+      href = row.name.href ?? '';
+    } else {
+      name = String(row.name);
+    }
+  }
+
+  if (!hasValue(name) && hasValue(row.agent_name)) {
+    if (typeof row.agent_name === 'object') {
+      name = row.agent_name.text ?? '';
+      href = href || (row.agent_name.href ?? '');
+    } else {
+      name = String(row.agent_name);
+    }
+  }
+
+  if (!hasValue(name) && hasValue(row.agent_id)) {
+    if (typeof row.agent_id === 'object') {
+      name = row.agent_id.text ?? '';
+      href = href || (row.agent_id.href ?? '');
+    } else {
+      name = String(row.agent_id);
+    }
+  }
+
+  if (!hasValue(href)) {
+    if (hasValue(row.href)) {
+      href = String(row.href);
+    } else if (row.agent_id && typeof row.agent_id === 'object' && hasValue(row.agent_id.href)) {
+      href = String(row.agent_id.href);
+    }
+  }
+
+  const rawRequesters = row.requester_count ?? row.requesters ?? row.requester_num;
+  const requesterText = formatUnitCount(rawRequesters, '发起人');
+
+  const rawTasks = row.task_count ?? row.tasks ?? row.task_num ?? row.event_count;
+  const taskText = formatUnitCount(rawTasks, '任务');
+
+  let time = '';
+  if (row.last_event_at && typeof row.last_event_at === 'object') {
+    time = row.last_event_at.text ?? '';
+  } else if (row.last_event_at) {
+    time = String(row.last_event_at);
+  }
+  if (!time && row.time) {
+    time = typeof row.time === 'object' ? (row.time.text ?? '') : String(row.time);
+  }
+  if (!time && row.last_active_at) {
+    time = typeof row.last_active_at === 'object' ? (row.last_active_at.text ?? '') : String(row.last_active_at);
+  }
+
+  const content = `<span class="name">${escapeHtml(name)}</span>`
+    + `<span class="num">${escapeHtml(requesterText)}</span>`
+    + `<span class="num">${escapeHtml(taskText)}</span>`
+    + `<span class="time">${escapeHtml(time)}</span>`
+    + `<span class="chev">${lucideChevron()}</span>`;
+
+  if (hasValue(href)) {
+    return `<a class="row" href="${escapeHtml(href)}">${content}</a>`;
+  }
+  return `<div class="row">${content}</div>`;
+}
+
+function renderAgentRowsSection(section) {
+  const id = section.id ?? '';
+  const rows = Array.isArray(section.rows) ? section.rows : [];
+  if (rows.length === 0) return '';
+
+  const renderedRows = rows.map((row) => renderAgentRow(row)).join('\n');
+  const body = `<div class="list">${renderedRows}</div>`;
+
+  return renderDataSection({
+    id,
+    title: section.title,
+    className: 'agent-rows-section',
+    body,
+  });
+}
+
+function renderSection(section, page = {}) {
   if (!section) return '';
   switch (section.type) {
     case 'requester_groups': return renderRequesterGroups(section);
     case 'task_list': return renderDataSection({ id: section.id, title: section.title, body: renderTaskRows(section.tasks) });
-    case 'table': return renderTableSection(section);
+    case 'agent_rows': return renderAgentRowsSection(section);
+    case 'table':
+      if (page.agent_index) {
+        return renderAgentRowsSection(section);
+      }
+      return renderTableSection(section);
     case 'definition_list': return renderDefinitionListSection(section);
     case 'link_list': return renderLinkListSection(section);
     case 'pagination': return renderPaginationSection(section);
@@ -524,10 +629,10 @@ function renderSection(section) {
   }
 }
 
-function renderSections(sections) {
+function renderSections(sections, page = {}) {
   const visible = visibleSections(sections);
   if (!Array.isArray(visible) || visible.length === 0) return '<div class="empty-state">暂无可展示的审查数据</div>';
-  return visible.map(renderSection).join('\n');
+  return visible.map((section) => renderSection(section, page)).join('\n');
 }
 
 function renderEmptyState() {
@@ -543,7 +648,7 @@ export function renderDashboard(templateInput) {
   const title = escapeHtml(page.title ?? '审计看板');
   const subtitle = escapeHtml(page.subtitle ?? '');
   const updatedAt = escapeHtml(page.updated_at ?? '');
-  const metrics = renderSummaryMetrics(templateInput?.summary_metrics);
+  const metrics = renderSummaryMetrics(templateInput?.summary_metrics, page);
   const filters = renderFilterBar(
     templateInput?.filters,
     templateInput?.clear_filters_href ?? page.clear_filters_href,
@@ -553,7 +658,7 @@ export function renderDashboard(templateInput) {
   const notificationStatus = renderNotificationStatus(page.notification_status);
   const pageActions = renderPageActions(page.page_actions);
   const notices = renderNotices(templateInput?.notices);
-  const sections = renderSections(templateInput?.sections);
+  const sections = renderSections(templateInput?.sections, page);
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1253,6 +1358,7 @@ footer { text-align: center; color: var(--text-muted); font-size: 12px; padding:
 .collapsible-section[open] .section-summary { border-bottom: 1px solid var(--border-default); }
 .collapsible-section[open] .section-summary-hint { visibility: hidden; }
 .collapsible-section[open] .section-summary-hint::after { content: "收起"; visibility: visible; }
+.collapsible-section:not([open]) > :not(summary) { display: none; }
 .collapsible-section > :not(summary) { margin: 16px; }
 .table-scroll {
   width: 100%;
@@ -1406,7 +1512,7 @@ footer { text-align: center; color: var(--text-muted); font-size: 12px; padding:
 .task-audit #task_conclusion .meta-key { width: auto; }
 .task-audit #task_conclusion .meta-val { flex: auto; }
 .task-audit .page-title { font-size: 24px; }
-.task-audit .meta-value, .task-audit .trace-step-body { min-width: 0; overflow-wrap: anywhere; }
+.task-audit .meta-val, .task-audit .meta-value, .task-audit .trace-step-body { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 .task-audit .raw-log-pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-audit #task_conclusion { border-left: 2px solid var(--status-high); }
 .task-audit .status-tag { font-family: inherit; }
@@ -1427,11 +1533,21 @@ footer { text-align: center; color: var(--text-muted); font-size: 12px; padding:
 .task-row time, .requester-group time { font-size: 11px; color: var(--text-secondary); }
 .task-request small { display: block; margin-top: 4px; color: var(--text-secondary); }
 .load-more { display: block; padding: 16px; text-align: center; }
+.list { display: grid; gap: 1px; background: var(--border-default); margin-top: 16px; border: 1px solid var(--border-default); }
+.row { background: var(--surface-panel); padding: 13px 15px; display: flex; align-items: center; gap: 12px; color: var(--text-primary); text-decoration: none; }
+a.row:hover { background: var(--surface-subtle); }
+.row .name { flex: 1; font-size: 13px; font-weight: 600; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.row .num { font-size: 11px; font-family: var(--font-mono, monospace); color: var(--text-secondary); white-space: nowrap; flex: 0 0 auto; }
+.row .time { font-size: 11px; font-family: var(--font-mono, monospace); color: var(--text-secondary); min-width: 62px; text-align: right; white-space: nowrap; flex: 0 0 auto; }
+.row .chev, .row .icon { color: var(--text-secondary); display: inline-flex; align-items: center; flex: 0 0 auto; }
+.row .chev svg, .row .icon svg { width: 14px; height: 14px; display: block; }
+.task-audit .agent-rows-section { background: transparent; border: 0; padding: 0; box-shadow: none; }
 @media (max-width: 720px) {
   .task-audit .container { padding: 16px 14px; }
   .task-audit .data-table { min-width: 0; width: 100%; table-layout: fixed; }
   .task-audit .data-table th, .task-audit .data-table td { white-space: normal; overflow-wrap: anywhere; }
-  .task-audit .meta-row, .task-audit .kv { display: grid; grid-template-columns: 1fr; }
+  .task-audit .meta-row, .task-audit .kv, .kv { display: grid; grid-template-columns: 1fr; gap: 2px; }
+  .kv dt { margin-top: 8px; }
   .task-audit #task_context .metadata-block, .task-audit #task_audit_result .metadata-block { grid-template-columns: 1fr; }
   .task-audit .app-bar-shell, .task-audit .context-header { flex-direction: column; align-items: stretch; }
   .task-audit .app-nav { flex-wrap: wrap; overflow: visible; }
@@ -1440,6 +1556,9 @@ footer { text-align: center; color: var(--text-muted); font-size: 12px; padding:
   .group-toolbar, .group-toolbar form { align-items: stretch; flex-direction: column; width: 100%; }
   .group-toolbar input { min-width: 0; width: 100%; }
   .task-audit .mono, .task-audit .breadcrumbs { overflow-wrap: anywhere; }
+  .row { flex-wrap: wrap; gap: 8px; }
+  .row .name { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+  .row .time { min-width: 0; }
 }
 </style>
 </head>
@@ -1454,8 +1573,8 @@ footer { text-align: center; color: var(--text-muted); font-size: 12px; padding:
     </div>
     <nav class="app-nav" aria-label="主导航">
       <a href="/" class="app-nav-link">Agent</a>
-      ${page.agent_index ? '' : `<a href="/dashboard#pending_findings" class="app-nav-link">风险发现</a>
-      <a href="/dashboard#reviews_with_findings" class="app-nav-link">审查批次</a>`}
+      <a href="/dashboard#pending_findings" class="app-nav-link">风险发现</a>
+      <a href="/dashboard#reviews_with_findings" class="app-nav-link">审查批次</a>
     </nav>
     <div class="app-meta">
       ${notificationStatus}

@@ -552,3 +552,170 @@ test('requester groups render accessible controls, escaped search, share links a
   assert.match(html, /加载更多/);
   assert.doesNotMatch(html, /<script>bad|›|&#9654;|&rsaquo;/);
 });
+
+test('home agent list renders compact rows without health dot, with counts, time, chevron and omits Agent count metric', () => {
+  const html = renderDashboard({
+    page: {
+      title: 'Agent 审计总览',
+      subtitle: '按 Agent 查看任务，进入后按发起用户分组',
+      agent_index: true,
+      task_audit: true,
+    },
+    summary_metrics: [
+      { label: 'Agent 数', value: 3, tone: 'neutral' },
+    ],
+    sections: [
+      {
+        id: 'agents',
+        title: '已接收日志的 Agent',
+        type: 'agent_rows',
+        rows: [
+          {
+            name: 'MT Agent',
+            requester_count: 4,
+            task_count: 13,
+            time: '14:48',
+            href: '/dashboard/agents/mt-agent',
+          },
+          {
+            agent_id: { text: 'Catalog Agent', href: '/dashboard/agents/catalog-agent' },
+            requester_count: '1 发起人',
+            task_count: '8 任务',
+            last_event_at: '昨天',
+          },
+          {
+            agent_id: 'deploy-agent',
+            requesters: 2,
+            tasks: 5,
+            time: '2 天前',
+          },
+          {
+            name: 'Ticket Agent',
+            requester_num: 2,
+            task_num: 21,
+            time: '3 天前',
+          },
+        ],
+      },
+    ],
+  });
+
+  // 去掉首页“Agent 数”汇总指标卡
+  assert.doesNotMatch(html, /<div class="metric-label">Agent 数<\/div>/);
+  assert.doesNotMatch(html, /<section class="summary-metrics"/);
+
+  // 验证不包含 health/dot 相关元素
+  assert.doesNotMatch(html, /<span class="dot/);
+  assert.doesNotMatch(html, /\bdot\b/);
+
+  // 紧凑列表行形态验证（结构：名称 + 发起人数 + 任务数 + 相对时间 + chevron）
+  assert.match(html, /<div class="list">/);
+  assert.match(html, /<a class="row" href="\/dashboard\/agents\/mt-agent"><span class="name">MT Agent<\/span><span class="num">4 发起人<\/span><span class="num">13 任务<\/span><span class="time">14:48<\/span><span class="chev"><svg class="lucide lucide-chevron-right"/);
+
+  assert.match(html, /<span class="name">Catalog Agent<\/span>/);
+  assert.match(html, /<span class="time">昨天<\/span>/);
+
+  assert.match(html, /<span class="name">deploy-agent<\/span>/);
+  assert.match(html, /<span class="time">2 天前<\/span>/);
+
+  assert.match(html, /<span class="name">Ticket Agent<\/span>/);
+  assert.match(html, /<span class="time">3 天前<\/span>/);
+
+  // 导航三项常驻验证（即使 agent_index 为真）
+  const navLinks = html.match(/class="app-nav-link"/g) ?? [];
+  assert.equal(navLinks.length, 3);
+  assert.match(html, /<a href="\/" class="app-nav-link">Agent<\/a>/);
+  assert.match(html, /<a href="\/dashboard#pending_findings" class="app-nav-link">风险发现<\/a>/);
+  assert.match(html, /<a href="\/dashboard#reviews_with_findings" class="app-nav-link">审查批次<\/a>/);
+
+  // 720px 及以下媒体查询规则验证
+  assert.match(html, /@media \(max-width: 720px\)/);
+  assert.match(html, /\.row\s*\{\s*flex-wrap:\s*wrap;\s*gap:\s*8px;\s*\}/);
+  assert.match(html, /\.row \.name\s*\{\s*flex:\s*1 1 100%;/);
+});
+
+test('renderAgentRow prioritizes name and agent_name over agent_id, handles long names and preserves href', () => {
+  const html = renderDashboard({
+    page: {
+      title: 'Agent 审计总览',
+      agent_index: true,
+      task_audit: true,
+    },
+    sections: [
+      {
+        id: 'agents',
+        title: '已接收日志的 Agent',
+        type: 'agent_rows',
+        rows: [
+          // 1. 同时有 agent_id 和 name：确保 name 优先，不被 agent_id 覆盖
+          {
+            agent_id: { text: 'raw-agent-id-1', href: '/dashboard/agents/raw-agent-id-1' },
+            name: '人类可读 Agent 甲',
+            requester_count: 5,
+            task_count: 20,
+            time: '12:00',
+          },
+          // 2. 同时有 agent_id 和 agent_name：确保 agent_name 优先
+          {
+            agent_id: 'raw-agent-id-2',
+            agent_name: '人类可读 Agent 乙',
+            href: '/dashboard/agents/raw-agent-id-2',
+            requester_count: 2,
+            task_count: 8,
+            time: '昨天',
+          },
+          // 3. 仅有 agent_id：优雅降级展示 agent_id
+          {
+            agent_id: { text: 'fallback-agent-id', href: '/dashboard/agents/fallback-agent-id' },
+            requester_count: 1,
+            task_count: 3,
+            time: '2 天前',
+          },
+          // 4. 超长名称与长 ID
+          {
+            name: '超长名称-Very-Long-Agent-Name-That-Could-Potentially-Break-Flex-Layout-If-Not-Wrapped',
+            href: '/dashboard/agents/very-long',
+            requester_count: 99,
+            task_count: 999,
+            time: '2026-09-01',
+          },
+        ],
+      },
+      // 5. 原始日志 section 默认折叠
+      {
+        id: 'task_raw_logs',
+        title: '原始日志（1 条事件）',
+        type: 'raw_log_list',
+        collapsible: true,
+        snippets: [
+          {
+            label: '事件 1',
+            body: '{"event":"run.start"}',
+          },
+        ],
+      },
+    ],
+  });
+
+  // 1. 验证展示名没有被 agent_id 覆盖
+  assert.match(html, /<span class=\"name\">人类可读 Agent 甲<\/span>/);
+  assert.doesNotMatch(html, /<span class=\"name\">raw-agent-id-1<\/span>/);
+  assert.match(html, /href=\"\/dashboard\/agents\/raw-agent-id-1\"/);
+
+  // 2. 验证 agent_name 优先
+  assert.match(html, /<span class=\"name\">人类可读 Agent 乙<\/span>/);
+  assert.doesNotMatch(html, /<span class=\"name\">raw-agent-id-2<\/span>/);
+
+  // 3. 验证 fallback agent_id
+  assert.match(html, /<span class=\"name\">fallback-agent-id<\/span>/);
+
+  // 4. 验证长名称被正确渲染
+  assert.match(html, /Very-Long-Agent-Name/);
+
+  // 5. 验证原始日志为 details 折叠结构且默认不带 open 属性
+  assert.match(html, /<details id=\"task_raw_logs\" class=\"data-section raw-log-section collapsible-section\">/);
+  assert.doesNotMatch(html, /<details id=\"task_raw_logs\"[^>]*\bopen\b/);
+
+  // 6. 验证折叠规则确保 not([open]) 时子内容隐藏
+  assert.match(html, /\.collapsible-section:not\(\[open\]\)\s*>\s*:not\(summary\)\s*\{\s*display:\s*none;\s*\}/);
+});

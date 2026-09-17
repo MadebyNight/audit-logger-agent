@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { renderDashboard } from '../../src/auditReview/dashboardTemplate.js';
-import { createVisualization } from '../../src/auditReview/visualization.js';
+import { createVisualization, formatRelativeTime } from '../../src/auditReview/visualization.js';
 
 function finding(overrides = {}) {
   return {
@@ -290,16 +290,193 @@ test('agentIndexPage lists received agents linked to requester groups without ri
   }).agentIndexPage();
 
   assert.equal(page.page.title, 'Agent 日志入口');
+  assert.deepEqual(page.summary_metrics, []);
   const section = page.sections.find((item) => item.id === 'received_agents');
   assert.equal(section.title, '已接收日志的 Agent');
   assert.equal(section.rows[0].agent_id.text, 'agent-1');
   assert.equal(section.rows[0].agent_id.href, '/dashboard/agents/agent-1');
+  assert.equal(section.rows[0].href, '/dashboard/agents/agent-1');
+  assert.equal('health' in section.rows[0], false);
+  assert.equal(section.rows[0].requester_count, 0);
+  assert.equal(section.rows[0].task_count, 0);
+  assert.equal(section.rows[0].time, '2026-07-03');
+  assert.equal(section.rows[0].last_event_at.text, '2026-07-03');
+  assert.equal(section.rows[0].last_event_at.raw, '2026-07-03T10:02:00.000Z');
   assert.equal(section.rows[1].agent_id.href, '/dashboard/agents/agent.2');
+  assert.equal('health' in section.rows[1], false);
+  assert.equal(section.rows[1].time, '2026-07-03');
   assert.doesNotMatch(JSON.stringify(page.sections), /finding|severity|risk_level/);
   assert.deepEqual(page.page.page_actions, []);
   const html = renderDashboard(page);
-  assert.doesNotMatch(html, /风险发现|审查批次|查看全部审计|pending_findings|reviews_with_findings/);
+  assert.doesNotMatch(html, /查看全部审计|id="pending_findings"|id="reviews_with_findings"/);
   assert.match(html, /href="\/dashboard\/agents\/agent-1"/);
+});
+
+test('agentIndexPage derives requester count, task count and picks latest event time between agent and traces', () => {
+  const fakeTraceStore = {
+    listTraces({ agentId }) {
+      if (agentId === 'agent-traces') {
+        return [
+          {
+            agent_id: 'agent-traces',
+            trace_id: 't-1',
+            requester_id: 'u-1',
+            last_event_at: '2026-07-03T12:00:00.000Z',
+            sealed_at: '2026-07-03T12:00:00.000Z',
+            review_version: 1,
+            risk_level: 'none',
+          },
+          {
+            agent_id: 'agent-traces',
+            trace_id: 't-2',
+            requester_id: 'u-1',
+            last_event_at: '2026-07-03T11:00:00.000Z',
+            sealed_at: '2026-07-03T11:00:00.000Z',
+            review_version: 1,
+            risk_level: 'low',
+          },
+          {
+            agent_id: 'agent-traces',
+            trace_id: 't-3',
+            requester_id: null,
+            last_event_at: '2026-07-03T10:00:00.000Z',
+            sealed_at: '2026-07-03T10:00:00.000Z',
+            review_version: 1,
+            risk_level: 'none',
+          },
+          {
+            agent_id: 'agent-traces',
+            trace_id: 't-4',
+            requester_id: '',
+            last_event_at: '2026-07-03T09:00:00.000Z',
+            sealed_at: '2026-07-03T09:00:00.000Z',
+            review_version: 1,
+            risk_level: 'none',
+          },
+        ];
+      }
+      if (agentId === 'agent-trace-newer') {
+        return [
+          {
+            agent_id: 'agent-trace-newer',
+            trace_id: 't-newer',
+            requester_id: 'u-2',
+            last_event_at: '2026-07-03T15:00:00.000Z',
+            sealed_at: '2026-07-03T15:00:00.000Z',
+            review_version: 1,
+            risk_level: 'none',
+          },
+        ];
+      }
+      if (agentId === 'agent-event-newer') {
+        return [
+          {
+            agent_id: 'agent-event-newer',
+            trace_id: 't-older',
+            requester_id: 'u-3',
+            last_event_at: '2026-07-03T10:00:00.000Z',
+            sealed_at: '2026-07-03T10:00:00.000Z',
+            review_version: 1,
+            risk_level: 'none',
+          },
+        ];
+      }
+      return [];
+    },
+  };
+
+  const viz = createVisualization({
+    reviewStore: {
+      listAgents() {
+        return [
+          { agent_id: 'agent-traces', last_event_at: '2026-07-03T12:00:00.000Z' },
+          { agent_id: 'agent-trace-newer', last_event_at: '2026-07-03T13:00:00.000Z' },
+          { agent_id: 'agent-event-newer', last_event_at: '2026-07-03T14:30:00.000Z' },
+          { agent_id: 'agent-unknown', last_event_at: null },
+        ];
+      },
+      listFindings() {
+        return [];
+      },
+    },
+    traceStore: fakeTraceStore,
+  });
+
+  const page = viz.agentIndexPage({ now: '2026-07-04T12:00:00.000Z' });
+  const rows = page.sections[0].rows;
+
+  // 1. requester_count: u-1 一组，null 和 '' 归入“发起人未知”一组，共 2 组；任务数 4
+  assert.equal(rows[0].requester_count, 2);
+  assert.equal(rows[0].task_count, 4);
+  assert.equal(rows[0].last_event_at.raw, '2026-07-03T12:00:00.000Z');
+  assert.equal('health' in rows[0], false);
+
+  // 2. trace 时间更新时：正确选取 trace 的最新时间 15:00
+  assert.equal(rows[1].requester_count, 1);
+  assert.equal(rows[1].task_count, 1);
+  assert.equal(rows[1].last_event_at.raw, '2026-07-03T15:00:00.000Z');
+  assert.equal('health' in rows[1], false);
+
+  // 3. agent.last_event_at（新入库日志）更新时：不因已有旧 trace 遗漏新事件，取 14:30
+  assert.equal(rows[2].requester_count, 1);
+  assert.equal(rows[2].task_count, 1);
+  assert.equal(rows[2].last_event_at.raw, '2026-07-03T14:30:00.000Z');
+  assert.equal('health' in rows[2], false);
+
+  // 4. 缺失时间/无数据容错
+  assert.equal(rows[3].last_event_at.raw, '');
+  assert.equal('health' in rows[3], false);
+});
+
+test('formatRelativeTime and agentIndexPage time field follow relative time rules', () => {
+  const base = new Date(2026, 8, 14, 15, 0, 0); // 2026-09-14 15:00:00 本地时间
+
+  // 1. 今天 => HH:mm
+  const todayDate = new Date(2026, 8, 14, 14, 48, 0);
+  assert.equal(formatRelativeTime(todayDate.toISOString(), base), '14:48');
+
+  // 2. 昨天 => "昨天"
+  const yesterdayDate = new Date(2026, 8, 13, 20, 30, 0);
+  assert.equal(formatRelativeTime(yesterdayDate.toISOString(), base), '昨天');
+
+  // 3. 2-6 天 => "N 天前"
+  const twoDaysAgo = new Date(2026, 8, 12, 10, 0, 0);
+  assert.equal(formatRelativeTime(twoDaysAgo.toISOString(), base), '2 天前');
+  const threeDaysAgo = new Date(2026, 8, 11, 9, 15, 0);
+  assert.equal(formatRelativeTime(threeDaysAgo.toISOString(), base), '3 天前');
+  const sixDaysAgo = new Date(2026, 8, 8, 18, 0, 0);
+  assert.equal(formatRelativeTime(sixDaysAgo.toISOString(), base), '6 天前');
+
+  // 4. 更久 (>=7 天) => "YYYY-MM-DD"
+  const sevenDaysAgo = new Date(2026, 8, 7, 10, 0, 0);
+  assert.equal(formatRelativeTime(sevenDaysAgo.toISOString(), base), '2026-09-07');
+  const wayBack = new Date(2026, 6, 3, 10, 2, 0);
+  assert.equal(formatRelativeTime(wayBack.toISOString(), base), '2026-07-03');
+
+  // 5. 边界与无效输入
+  assert.equal(formatRelativeTime(null), '');
+  assert.equal(formatRelativeTime(''), '');
+  assert.equal(formatRelativeTime('invalid-date'), '');
+
+  // 6. agentIndexPage 将相对时间应用到首页行的 time 字段
+  const viz = createVisualization({
+    reviewStore: {
+      listAgents() {
+        return [
+          { agent_id: 'agent-today', last_event_at: todayDate.toISOString() },
+          { agent_id: 'agent-yesterday', last_event_at: yesterdayDate.toISOString() },
+          { agent_id: 'agent-2d', last_event_at: twoDaysAgo.toISOString() },
+          { agent_id: 'agent-older', last_event_at: sevenDaysAgo.toISOString() },
+        ];
+      },
+    },
+  });
+  const page = viz.agentIndexPage({ now: base });
+  const rows = page.sections[0].rows;
+  assert.equal(rows[0].time, '14:48');
+  assert.equal(rows[1].time, '昨天');
+  assert.equal(rows[2].time, '2 天前');
+  assert.equal(rows[3].time, '2026-09-07');
 });
 
 test('manualDailyReportPage returns a server-rendered Beijing-time confirmation model', () => {
