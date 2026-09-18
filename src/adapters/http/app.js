@@ -4,6 +4,7 @@ import fs from 'fs';
 import { renderDashboard } from '../../auditReview/dashboardTemplate.js';
 import { handleIngestRoute, isHttpIngestEnabled } from './ingestRoute.js';
 import { readTracePage, traceHealth } from '../../auditReview/traceReadService.js';
+import { renderApiTokenDrawer, renderApiTokenLauncher } from '../../auditReview/apiTokenTemplate.js';
 
 const DEFAULT_MAX_BODY_BYTES = 1024 * 1024;
 
@@ -121,7 +122,7 @@ function auditJson(res, status, data, corsHeaders) {
   res.end(JSON.stringify(data));
 }
 
-function html(res, status, body, corsHeaders) {
+function sendHtml(res, status, body, corsHeaders) {
   const headers = {
     'content-type': 'text/html; charset=utf-8',
     'cache-control': 'no-store',
@@ -531,7 +532,7 @@ async function performFindingAction(findingLifecycleService, findingId, input) {
   return handler.call(findingLifecycleService, { findingId, ...input });
 }
 
-export function createHttpApp({ db, config, scheduler, reviewStore, visualization, dashboardAuth, findingLifecycleService, toolSemanticMapper, retentionService, notificationDigestScheduler, flushNotifications, now = () => new Date() } = {}) {
+export function createHttpApp({ db, config, apiTokenService, scheduler, reviewStore, visualization, dashboardAuth, findingLifecycleService, toolSemanticMapper, retentionService, notificationDigestScheduler, flushNotifications, now = () => new Date() } = {}) {
   let activeTraceExports = 0;
   const exportConcurrency = positiveInteger(config?.auditReview?.http?.maxConcurrentTraceExports, 2);
   const exportMaxBytes = positiveInteger(config?.auditReview?.http?.maxTraceResponseBytes, 4 * 1024 * 1024);
@@ -545,8 +546,20 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
   }
   return http.createServer(async (req, res) => {
     const url = parseUrl(req);
+    let method = req.method;
+    let createdToken;
+    let tokenError;
+    let openTokens = false;
+    function html(response, status, body, corsHeaders) {
+      if (apiTokenService && status === 200) {
+        const drawer = renderApiTokenDrawer({ accounts: apiTokenService.list(), records: apiTokenService.recent(), token: createdToken, error: tokenError, open: openTokens, returnTo: url.pathname + url.search });
+        body = body.replace('</header>', renderApiTokenLauncher() + '</header>');
+        body = body.includes('</body>') ? body.replace('</body>', drawer + '</body>') : body + drawer;
+      }
+      sendHtml(response, status, body, corsHeaders);
+    }
 
-    if (req.method === 'OPTIONS') {
+    if (method === 'OPTIONS') {
       if (url.pathname === '/v1/audit-logs') {
         auditJson(res, 204, {}, reviewCors(req));
         return;
@@ -556,18 +569,44 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
     }
 
     try {
-      if (req.method === 'GET' && url.pathname === '/v1/audit-logs') {
+      if (apiTokenService && method === 'POST' && (url.pathname === '/dashboard/api-tokens' || /^\/dashboard\/api-tokens\/[^/]+\/(revoke|restore|delete)$/.test(url.pathname))) {
+        const form = await readForm(req, maxBodyBytes(config));
+        try {
+          if (url.pathname === '/dashboard/api-tokens') createdToken = apiTokenService.create(form.name).token;
+          else {
+            const [, , , id, action] = url.pathname.split('/');
+            const handler = { revoke: 'revoke', restore: 'restore', delete: 'remove' }[action];
+            if (!apiTokenService[handler](id)) tokenError = 'Token 不存在或已删除';
+          }
+        } catch (error) {
+          if (error.status !== 400) throw error;
+          tokenError = error.message;
+        }
+        openTokens = true;
+        const returnUrl = new URL(form.return_to || '/dashboard', 'http://127.0.0.1');
+        const allowedReturn = returnUrl.origin === 'http://127.0.0.1' && (['/', '/tasks', '/dashboard'].includes(returnUrl.pathname) || /^\/dashboard\/agents\//.test(returnUrl.pathname));
+        url.pathname = allowedReturn ? returnUrl.pathname : '/dashboard';
+        url.search = allowedReturn ? returnUrl.search : '';
+        method = 'GET';
+      }
+      if (method === 'GET' && url.pathname === '/v1/audit-logs') {
         const cors = reviewCors(req);
-        if (!dashboardAuth?.token()) {
+        const started = performance.now();
+        const auth = apiTokenService ? apiTokenService.authenticate(req) : dashboardAuth?.authorizeApi(req);
+        const reply = (status, data) => {
+          apiTokenService?.record({ accountId: auth?.accountId ?? null, searchParams: url.searchParams, status, count: data.count ?? 0, durationMs: performance.now() - started });
+          auditJson(res, status, data, cors);
+        };
+        if (!apiTokenService && !dashboardAuth?.token()) {
           auditJson(res, 503, { error_code: 'auth_not_configured', error: 'Audit export authentication is not configured' }, cors);
           return;
         }
-        if (!dashboardAuth.authorizeApi(req).ok) {
-          auditJson(res, 401, { error_code: 'unauthorized', error: 'Unauthorized' }, cors);
+        if (!auth?.ok) {
+          reply(401, { error_code: 'unauthorized', error: 'Unauthorized' });
           return;
         }
         if (activeTraceExports >= exportConcurrency) {
-          auditJson(res, 429, { error_code: 'rate_limited', error: 'Too many concurrent trace exports' }, cors);
+          reply(429, { error_code: 'rate_limited', error: 'Too many concurrent trace exports' });
           return;
         }
         activeTraceExports += 1;
@@ -578,15 +617,15 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
         try {
           // Yield so simultaneous requests observe the independent export concurrency budget.
           await new Promise((resolve) => setImmediate(resolve));
-          auditJson(res, 200, readTracePage(db, url.searchParams, { maxResponseBytes: exportMaxBytes }), cors);
+          reply(200, readTracePage(db, url.searchParams, { maxResponseBytes: exportMaxBytes }));
         } catch (error) {
-          auditJson(res, error.status ?? 500, { error_code: error.code ?? 'internal_error', error: error.message }, cors);
+          reply(error.status ?? 500, { error_code: error.code ?? 'internal_error', error: error.message });
         }
         return;
       }
       // ===================== Dashboard Pages (v1.4) =====================
       const taskDashboardMatch = url.pathname.match(/^\/dashboard\/agents\/([^/]+)(?:\/(traces|requesters)\/([^/]+))?\/?$/);
-      if (hasReviewDeps && req.method === 'GET' && taskDashboardMatch) {
+      if (hasReviewDeps && method === 'GET' && taskDashboardMatch) {
         const cors = reviewCors(req);
         const fail = mapAuthFailure(dashboardAuth.authorizeDashboard(req));
         if (fail) { html(res, fail.status, `<h1>${fail.body.error}</h1>`, cors); return; }
@@ -622,7 +661,7 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
         html(res, 200, renderDashboard(page), cors);
         return;
       }
-      if (hasReviewDeps && req.method === 'GET' && (url.pathname === '/tasks' || url.pathname === '/tasks/')) {
+      if (hasReviewDeps && method === 'GET' && (url.pathname === '/tasks' || url.pathname === '/tasks/')) {
         const cors = reviewCors(req);
         const auth = dashboardAuth.authorizeDashboard(req);
         const fail = mapAuthFailure(auth);
@@ -633,7 +672,7 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
         html(res, 200, renderDashboard(page), cors);
         return;
       }
-      if (hasReviewDeps && req.method === 'GET' && (url.pathname === '/' || url.pathname === '')) {
+      if (hasReviewDeps && method === 'GET' && (url.pathname === '/' || url.pathname === '')) {
         const cors = reviewCors(req);
         const auth = dashboardAuth.authorizeDashboard(req);
         const fail = mapAuthFailure(auth);
@@ -645,7 +684,7 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
         return;
       }
 
-      if (hasReviewDeps && req.method === 'GET' && url.pathname === MANUAL_DAILY_REPORT_PATH) {
+      if (hasReviewDeps && method === 'GET' && url.pathname === MANUAL_DAILY_REPORT_PATH) {
         const cors = reviewCors(req);
         const auth = dashboardAuth.authorizeDashboard(req);
         const fail = mapAuthFailure(auth);
@@ -661,7 +700,7 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
         return;
       }
 
-      if (hasReviewDeps && req.method === 'POST' && url.pathname === MANUAL_DAILY_REPORT_PATH) {
+      if (hasReviewDeps && method === 'POST' && url.pathname === MANUAL_DAILY_REPORT_PATH) {
         const cors = reviewCors(req);
         const auth = dashboardAuth.authorizeDashboard(req);
         const fail = mapAuthFailure(auth);
@@ -690,7 +729,7 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
         return;
       }
 
-      if (hasReviewDeps && req.method === 'GET' && (url.pathname === '/dashboard' || url.pathname === '/dashboard/')) {
+      if (hasReviewDeps && method === 'GET' && (url.pathname === '/dashboard' || url.pathname === '/dashboard/')) {
         const cors = reviewCors(req);
         const auth = dashboardAuth.authorizeDashboard(req);
         const fail = mapAuthFailure(auth);
@@ -708,7 +747,7 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
       }
 
       const dashboardFindingActionMatch = url.pathname.match(/^\/dashboard\/audit-findings\/([^/]+)\/actions$/);
-      if (hasReviewDeps && req.method === 'POST' && dashboardFindingActionMatch) {
+      if (hasReviewDeps && method === 'POST' && dashboardFindingActionMatch) {
         const cors = reviewCors(req);
         const auth = dashboardAuth.authorizeDashboard(req);
         const fail = mapAuthFailure(auth);
@@ -729,7 +768,7 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
         return;
       }
 
-      if (hasReviewDeps && req.method === 'GET' && url.pathname.startsWith('/dashboard/audit-reviews/')) {
+      if (hasReviewDeps && method === 'GET' && url.pathname.startsWith('/dashboard/audit-reviews/')) {
         const cors = reviewCors(req);
         const auth = dashboardAuth.authorizeDashboard(req);
         const fail = mapAuthFailure(auth);
@@ -743,7 +782,7 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
         return;
       }
 
-      if (hasReviewDeps && req.method === 'GET' && url.pathname.startsWith('/dashboard/audit-findings/')) {
+      if (hasReviewDeps && method === 'GET' && url.pathname.startsWith('/dashboard/audit-findings/')) {
         const cors = reviewCors(req);
         const auth = dashboardAuth.authorizeDashboard(req);
         const fail = mapAuthFailure(auth);
@@ -762,7 +801,7 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
         return;
       }
 
-      if (req.method === 'GET' && url.pathname === '/health') {
+      if (method === 'GET' && url.pathname === '/health') {
         const dbProbe = dbWritableProbe(db);
         const status = dbProbe.writable ? 'ok' : 'error';
         json(res, dbProbe.writable ? 200 : 503, {
@@ -779,7 +818,7 @@ export function createHttpApp({ db, config, scheduler, reviewStore, visualizatio
         return;
       }
 
-      if (req.method === 'POST' && url.pathname === '/v1/ingest' && isHttpIngestEnabled(config)) {
+      if (method === 'POST' && url.pathname === '/v1/ingest' && isHttpIngestEnabled(config)) {
         await handleIngestRoute(req, res, {
           config,
           db,

@@ -1046,7 +1046,8 @@ export function createVisualization({ reviewStore, traceStore, db, config, llmCl
   function dataDashboardPage(options = {}) {
     const days = Number(options.range) === 30 ? 30 : 7;
     const current = new Date();
-    const start = new Date(current.getTime() - (days - 1) * 86400000);
+    const dayKey = value => new Date(new Date(value).getTime() + 8 * 3600000).toISOString().slice(0, 10);
+    const start = new Date(new Date(`${dayKey(current)}T00:00:00+08:00`).getTime() - (days - 1) * 86400000);
     const startIso = start.toISOString();
     const taskHref = (params = {}) => { const query = new URLSearchParams(params); return `/tasks${query.size ? `?${query}` : ''}`; };
     let rows = [];
@@ -1061,10 +1062,13 @@ export function createVisualization({ reviewStore, traceStore, db, config, llmCl
     const pending = stateRows.filter((row) => row.state.key === 'pending').length;
     const daily = Array.from({ length: days }, (_, index) => {
       const day = new Date(start.getTime() + index * 86400000);
-      const key = day.toISOString().slice(0, 10);
-      const values = stateRows.filter((row) => String(row.last_event_at ?? '').slice(0, 10) === key);
+      const key = dayKey(day);
+      const values = stateRows.filter((row) => row.last_event_at && dayKey(row.last_event_at) === key);
       const label = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' }).format(day);
-      return { label, short_label: label, total: values.length, attention: values.filter((row) => row.state.key === 'attention').length };
+      return { label, short_label: label,
+        success: values.filter(row => Number(row.review_version) > 0 && row.trace_status === 'success').length,
+        failed: values.filter(row => Number(row.review_version) > 0 && ['failed', 'interrupted'].includes(row.trace_status)).length,
+        pending: values.filter(row => row.state.key === 'pending').length };
     });
     const grouped = (key, fallback, hrefFor) => {
       const map = new Map();
@@ -1072,11 +1076,11 @@ export function createVisualization({ reviewStore, traceStore, db, config, llmCl
       const max = Math.max(1, ...[...map.values()].map((item) => item.total));
       return [...map.values()].sort((a, b) => b.total - a.total || a.label.localeCompare(b.label)).slice(0, 5).map((item) => ({ ...item, percent: Math.round(item.total / max * 100), completion_rate: item.total ? `${Math.round(item.done / item.total * 100)}%` : '—', href: hrefFor(item.label) }));
     };
-    const maxTotal = Math.max(1, ...daily.map((row) => row.total));
-    const maxAttention = Math.max(1, ...daily.map((row) => row.attention));
     return { page: { title: '数据看板', data_dashboard: true, updated_at: nowIso() }, dashboard: {
       updated_at: new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' }).format(current), range_label: `最近 ${days} 天`, range_links: { seven: '/?range=7', thirty: '/?range=30' }, total: stateRows.length, done, completion_rate: stateRows.length ? `${(done / stateRows.length * 100).toFixed(1)}%` : '—', attention_count: attention.length, pending_count: pending,
-      trend: daily.map((row) => ({ ...row, total_percent: Math.max(3, Math.round(row.total / maxTotal * 100)), attention_percent: row.attention ? Math.max(3, Math.round(row.attention / maxAttention * 100)) : 0 })),
+      trend: daily,
+      agents_count: new Set(stateRows.map(row => row.agent_id || 'Agent 未知')).size,
+      requesters_count: new Set(stateRows.map(row => row.requester_id || '发起人未知')).size,
       agents: grouped('agent_id', 'Agent 未知', (agent) => taskHref({ agent_id: agent, sort: 'priority', page: '1' })), requesters: grouped('requester_id', '发起人未知', (requester) => taskHref({ requester: requester === '发起人未知' ? 'unknown' : `id:${requester}`, sort: 'priority', page: '1' })),
       attention_href: taskHref({ state: 'attention', sort: 'priority', page: '1' }), attention: attention.slice().sort((a, b) => String(b.last_event_at ?? '').localeCompare(String(a.last_event_at ?? ''))).slice(0, 5).map((row) => ({ request: row.original_request || '未记录原始请求', agent_id: row.agent_id, href: traceUrl(row.agent_id, row.trace_id) })), api: { ingest_url: `${baseUrl}/v1/ingest`, read_url: `${baseUrl}/v1/audit-logs`, docs_url: '/docs/agent-audit-log-integration-guide.md' },
     } };

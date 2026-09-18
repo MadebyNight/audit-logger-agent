@@ -78,7 +78,7 @@ export function renderTaskWorkbench(input, escape) {
 
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(input.page?.title ?? '任务工作台')} · Audit Logger</title><style>${styles}</style></head>
 <body class="task-workbench${w.standalone && selected ? ' detail-open' : ''}"><a class="skip-link" href="#main-content">跳到主要内容</a>
-<div class="shell"><aside class="sidebar"><a href="/" class="brand"><span class="brand-mark">${icon('layers')}</span>Audit Logger</a><div class="workspace">任务审计<span>请求、结果与完整证据</span></div><nav aria-label="主导航"><a class="nav-link" href="/">${icon('grid')}数据看板</a><a class="nav-link active" href="/tasks">${icon('file')}任务工作台</a></nav><section class="agent-nav" aria-label="Agent 列表"><div class="agent-nav-heading"><span>Agent 列表</span><span>任务数</span></div>${agents || '<p class="agent-empty">暂无已审计的 Agent</p>'}</section><div class="sidebar-note">以日志记录为依据<br>查看任务结果与审计结论</div></aside>
+<div class="shell"><aside class="sidebar"><a href="/" class="brand"><span class="brand-mark">${icon('layers')}</span>Audit Logger</a><div class="workspace">任务审计<span>请求、结果与完整证据</span></div><nav aria-label="主导航"><a class="nav-link" href="/">${icon('grid')}数据看板</a><a class="nav-link active" href="/tasks">${icon('file')}任务工作台</a></nav><section class="agent-nav" aria-label="Agent 列表"><div class="agent-nav-heading"><span>Agent 列表</span><span>任务数</span></div><div class="agent-scroll" tabindex="0" role="region" aria-label="Agent 选项">${agents || '<p class="agent-empty">暂无已审计的 Agent</p>'}</div></section><div class="sidebar-note">以日志记录为依据<br>查看任务结果与审计结论</div></aside>
 <main class="main" id="main-content"><header class="topbar"><span>审计空间 <span aria-hidden="true">/</span> 任务工作台</span><a class="overview-link" href="/">数据看板</a></header>
 <section class="intro"><span class="eyebrow">TASK WORKSPACE</span><h1>每个任务，都有迹可循。</h1><p>查看谁发起了任务、提出了什么请求，以及 Agent 最终做了什么。</p></section>
 <section class="metrics" aria-label="任务状态筛选" aria-describedby="stats-scope">${stats}</section><p id="stats-scope" class="stats-scope">统计范围：当前搜索、Agent 与发起人；点击卡片查看对应状态。</p>
@@ -88,7 +88,7 @@ ${select('state', '行动状态', [{ value: '', label: '全部状态' }, { value
 ${select('sort', '任务排序', [{ value: 'priority', label: '需要关注优先' }, { value: 'recent', label: '最近活动优先' }], filters.sort ?? 'priority')}
 <button class="apply-filter" type="submit">筛选</button><a class="clear-filters" href="${escape(w.clear_href ?? '/')}">清除筛选</a></form>
 ${w.error ? `<div class="error-state" role="alert">${escape(w.error)}</div>` : ''}
-<div class="body-grid"><section class="task-list" aria-label="任务记录"><div class="list-heading"><span>任务记录</span><span>共 ${escape(p.total ?? 0)} 条</span></div>${rows || `<div class="empty">${w.error ? '任务数据暂不可用。' : '没有符合条件的任务。'}<p>可调整筛选条件后重试。</p></div>`}
+<div class="body-grid"><section class="task-list" aria-label="任务记录"><div class="list-heading"><span>任务记录</span><span>显示 ${escape(w.tasks?.length ?? 0)} / ${escape(p.total ?? 0)} 条</span></div><div class="task-scroll" tabindex="0" role="region" aria-label="本页任务记录">${rows || `<div class="empty">${w.error ? '任务数据暂不可用。' : '没有符合条件的任务。'}<p>可调整筛选条件后重试。</p></div>`}</div>
 ${p.totalPages > 1 ? `<nav class="pagination" aria-label="任务分页">${p.previousHref ? `<a href="${escape(p.previousHref)}">上一页</a>` : '<span>上一页</span>'}<span>第 ${escape(p.currentPage)} / ${escape(p.totalPages)} 页</span>${p.nextHref ? `<a href="${escape(p.nextHref)}">下一页</a>` : '<span>下一页</span>'}</nav>` : ''}</section><aside class="detail" id="task-detail" aria-label="任务详情">${detail()}</aside></div></section>
 <footer>日志审计 · 以原始请求、执行结果与完整证据为依据。时间均为北京时间（UTC+8）。</footer></main></div>
 <script>
@@ -140,4 +140,23 @@ body{font-size:16px;line-height:1.65}.shell{grid-template-columns:260px minmax(0
 @media(max-width:1100px){.shell{grid-template-columns:220px minmax(0,1fr)}.sidebar{padding-inline:12px}.body-grid{grid-template-columns:minmax(310px,.85fr) minmax(360px,1.15fr)}}
 @media(max-width:850px){.shell{display:block}.sidebar{display:block;border-right:0;border-bottom:1px solid var(--line);padding:14px}.brand,.workspace,.sidebar-note{display:none}.sidebar nav{display:flex;gap:4px;overflow-x:auto}.nav-link{white-space:nowrap;margin:0;padding:9px 10px}.agent-nav{margin-top:12px;padding-top:12px}.agent-nav-heading{display:none}.agent-nav{display:flex;gap:8px;overflow-x:auto}.agent-item{flex:0 0 auto;border:1px solid var(--line);padding:8px 10px;font-size:14px}.agent-item strong{font-size:14px}.mobile-nav{display:none}.main{padding-inline:16px}.detail-open .agent-nav{display:none}.detail-open .task-list,.detail-open .toolbar,.detail-open .intro,.detail-open .metrics{display:none}.detail-open .detail{display:block;border:0}.detail h2{font-size:24px}}
 @media(max-width:720px){body{font-size:16px}.main{padding-inline:12px}.intro h1{font-size:28px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.metric-label{font-size:14px}.metric strong{font-size:25px}.toolbar{padding:12px}.filter-select{flex:1 1 100%;max-width:none}.apply-filter,.clear-filters{flex:1 1 auto;text-align:center}.task{padding:18px 14px}.task-top h3{font-size:18px}.detail-head,.detail-content{padding:18px}.detail h2{font-size:22px}.facts{font-size:16px}.audit-metadata .facts{grid-template-columns:88px minmax(0,1fr)}.tabs{padding-inline:18px}.tab{font-size:16px}}
+
+/* Bounded regions keep growing records inside the workspace, not the page. */
+:root{--workspace-height:clamp(360px,70dvh,900px)}
+.body-grid{align-items:start;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr)}
+.task-list,.detail{display:flex;flex-direction:column;max-height:var(--workspace-height);min-height:0}
+.task-scroll{min-height:0;overflow-y:auto;overflow-x:hidden}
+.detail-content{min-height:0;overflow-y:auto;overflow-x:hidden}
+.list-heading,.pagination,.detail-head,.tabs{flex-shrink:0}
+.list-heading{flex-wrap:wrap}
+.task-requester,.task-meta>span{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent-label{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.detail-head h2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.detail-kicker .mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.detail-meta>span{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agent-scroll{max-height:clamp(160px,calc(100dvh - 420px),600px);overflow-y:auto;overflow-x:hidden}
+.task-scroll,.detail-content,.agent-scroll{scrollbar-gutter:stable;scrollbar-width:thin;scrollbar-color:#526476 transparent}
+.task-scroll:focus-visible,.agent-scroll:focus-visible,.detail-content:focus-visible{outline-offset:-2px}
+@media(max-width:850px){.agent-nav{display:block;overflow:visible}.agent-scroll{display:flex;gap:8px;max-height:100px;overflow-x:auto;overflow-y:hidden;scrollbar-gutter:auto}.agent-item{max-width:240px}.agent-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.detail{display:none}.detail-open .detail{display:flex}}
+@media(max-width:720px){:root{--workspace-height:70dvh}.detail-open .detail{max-height:calc(100dvh - 160px)}.detail-head{padding:14px 18px}.detail-meta{font-size:14px}.detail-meta>span{flex:1 1 100%}}
 `;

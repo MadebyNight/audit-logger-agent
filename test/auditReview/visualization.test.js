@@ -3,6 +3,42 @@ import assert from 'node:assert/strict';
 import { renderDashboard } from '../../src/auditReview/dashboardTemplate.js';
 import { createVisualization, formatRelativeTime } from '../../src/auditReview/visualization.js';
 
+test('task trend separates outcomes, excludes unreviewed tasks and includes the first Beijing day', () => {
+  const today = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+  const first = new Date(new Date(`${today}T00:00:00+08:00`).getTime() - 6 * 86400000).toISOString();
+  const rows = ['success', 'failed', 'interrupted', 'incomplete', 'success'].map((status, index) => ({
+    agent_id: 'trend-agent', trace_id: String(index), last_event_at: first,
+    sealed_at: first, review_version: index === 4 ? 0 : 1,
+    trace_status: status, risk_level: ['failed', 'interrupted'].includes(status) ? 'high' : 'none',
+  }));
+  const viz = createVisualization({ reviewStore: {}, traceStore: { listTraces: () => rows }, config: {} });
+  const trend = viz.dataDashboardPage().dashboard.trend;
+  assert.equal(trend.length, 7);
+  assert.deepEqual([trend[0].success, trend[0].failed, trend[0].pending], [1, 2, 1]);
+  assert.ok(trend.slice(1).every(day => day.success === 0 && day.failed === 0 && day.pending === 0));
+  assert.equal(viz.dataDashboardPage({ range: 30 }).dashboard.trend.length, 30);
+});
+
+test('dashboard preserves five-row summaries while reporting complete group and task counts', () => {
+  const now = new Date().toISOString();
+  const rows = Array.from({ length: 28 }, (_, i) => ({
+    agent_id: `agent-${i % 7}`, requester_id: i % 8 ? `user-${i % 8}` : null,
+    trace_id: String(i), sealed_at: now, last_event_at: now,
+    review_version: 1, trace_status: 'failed', risk_level: 'high',
+  }));
+  const viz = createVisualization({ reviewStore: {}, traceStore: { listTraces: () => rows }, config: {} });
+  const d = viz.dataDashboardPage().dashboard;
+  assert.equal(d.agents.length, 5);
+  assert.equal(d.agents_count, 7);
+  assert.equal(d.requesters.length, 5);
+  assert.equal(d.requesters_count, 8);
+  assert.equal(d.attention.length, 5);
+  assert.equal(d.attention_count, 28);
+  const empty = createVisualization({ reviewStore: {}, traceStore: { listTraces: () => [] }, config: {} }).dataDashboardPage().dashboard;
+  assert.equal(empty.agents_count, 0);
+  assert.equal(empty.requesters_count, 0);
+});
+
 function finding(overrides = {}) {
   return {
     finding_id: 'f-critical',

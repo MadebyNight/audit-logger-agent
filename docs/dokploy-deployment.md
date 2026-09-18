@@ -25,14 +25,14 @@
 | `AUDIT_AGENT_LLM_TIMEOUT_MS` | 否 | LLM 请求超时毫秒数；未设置时为 `900000`（15 分钟） |
 | `AUDIT_AGENT_LLM_MAX_OUTPUT_TOKENS` | 否 | 单次 Responses API 最大输出 token；未设置时为 `1200` |
 | `AUDIT_AGENT_LLM_REASONING_EFFORT` | 否 | Responses API reasoning effort；未设置时为 `low` |
-| `AUDIT_AGENT_DASHBOARD_TOKEN` | 否 | `/v1/audit-*` Bearer 鉴权密钥；Dashboard 页面不使用它 |
+| `AUDIT_AGENT_DASHBOARD_TOKEN` | 否 | 兼容历史读取 Token，启动时作为历史服务账号迁移；新 Token 在 Dashboard 侧边栏申请 |
 | `AUDIT_AGENT_DASHBOARD_BASE_URL` | 容器部署是 | 外部可访问的 Dashboard 基地址，例如 `https://<域名>`；覆盖 `auditReview.visualization.baseUrl` |
 | `AUDIT_AGENT_FEISHU_MODE` | 否 | `disabled`、`dry-run` 或 `live`，默认 `disabled` |
 | `AUDIT_AGENT_FEISHU_WEBHOOK_URL` | live 时是 | 飞书自定义机器人 Webhook；只通过 Dokploy Secret 注入 |
 | `AUDIT_AGENT_FEISHU_WEBHOOK_FILE` | 否 | Webhook secret 文件路径；配置后优先于 URL 环境变量 |
 | `AUDIT_AGENT_FEISHU_LIVE_CONFIRM` | live 时是 | 必须为 `CONFIRM_FEISHU_LIVE`，用于防止误开启真实发送 |
 
-如需调用 `/v1/audit-*` API，`AUDIT_AGENT_DASHBOARD_TOKEN` 应是独立的高强度随机值。未配置时 Dashboard 仍可访问，但审查 API 的 Bearer 鉴权不会放行请求。
+调用 `/v1/audit-logs` 前，在 Dashboard 右下角「API Token」侧边栏申请只读 Token。无需配置环境变量，完整 Token 仅创建时展示。旧环境变量 Token 兼容迁移为独立账号，可以在侧边栏停用。
 
 飞书通知默认关闭。建议先使用 `dry-run` 验证卡片构建，再按“本地测试 → 卡片预览审核 → Docker 测试 → 真实客户端验收 → live”的顺序推进。Webhook 不应写入配置文件、Git、日志或命令历史；生产启用前应在飞书侧配置 IP 白名单或关键词安全策略。当前发送器未生成飞书签名字段，如需启用签名校验，应先扩展并验证签名支持。
 
@@ -88,7 +88,7 @@ GET /health -> 200
 https://<域名>/dashboard
 ```
 
-Dashboard 页面不要求登录，能访问该域名和路径的用户可以直接查看审计数据。生产环境应在 Dokploy Proxy、上游网关、VPN 或 IP allowlist 中限制访问范围。审查 API `/v1/audit-*` 不接受 Dashboard 页面访问权限，只接受 `AUDIT_AGENT_DASHBOARD_TOKEN` 对应的 Bearer 请求。
+Dashboard 页面不要求登录，内部用户可以直接查看审计数据并申请 Token。日志读取接口 `/v1/audit-logs` 接受已启用服务账号的 Bearer Token。账号、Token 摘要和 API 访问记录保存在同一 SQLite 数据库的独立表中，随数据卷备份；访问记录不进入审查、通知和日报。
 
 ## 7. 飞书通知
 

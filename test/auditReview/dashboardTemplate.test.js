@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { renderDashboard } from '../../src/auditReview/dashboardTemplate.js';
 import { renderDataDashboard } from '../../src/auditReview/dataDashboardTemplate.js';
 
-test('数据看板使用柱状趋势，且不显示 Agent 接入卡片', () => {
+test('数据看板使用三条结果折线，待核实采用黄色虚线', () => {
   const html = renderDataDashboard({
     dashboard: {
       range_label: '最近 7 天',
@@ -12,15 +12,49 @@ test('数据看板使用柱状趋势，且不显示 Agent 接入卡片', () => {
       completion_rate: '75%',
       attention_count: 2,
       pending_count: 1,
-      trend: [{ label: '2026-09-17', short_label: '09-17', total: 3, attention: 1, total_percent: 100, attention_percent: 33 }],
+      trend: [{ label: '2026-09-17', short_label: '09-17', success: 3, failed: 1, pending: 2 }],
       agents: [],
       requesters: [],
       attention: [],
     },
   });
 
-  assert.match(html, /<div class="trend"><div title="2026-09-17：3 个任务，1 个需要关注"><i style="height:100%"><\/i><b style="height:33%"><\/b><span>09-17<\/span><\/div><\/div>/);
-  assert.doesNotMatch(html, /trend-line|polyline|Agent 接入/);
+  assert.match(html, /data-series="success"[^>]+stroke="#6aafff"/);
+  assert.match(html, /data-series="failed"[^>]+stroke="#ff8585"/);
+  assert.match(html, /data-series="pending"[^>]+stroke="#eac568"[^>]+stroke-dasharray="7 5"/);
+  assert.doesNotMatch(html, /Agent 接入/);
+});
+
+test('dashboard summaries expose totals outside bounded keyboard-scrollable lists', () => {
+  const html = renderDataDashboard({ dashboard: {
+    range_label: '最近 7 天', range_links: {}, total: 100, completion_rate: '50%',
+    attention_count: 30, pending_count: 20, trend: [],
+    agents: [{ label: 'Agent A', total: 10, href: '/tasks?agent_id=a' }], agents_count: 12,
+    requesters: [], requesters_count: 0,
+    attention: [{ request: '<长请求>', agent_id: 'a', href: '/tasks/a' }],
+    attention_href: '/tasks?state=attention',
+  } });
+  assert.match(html, /显示 1 \/ 12 个/);
+  assert.match(html, /显示 0 \/ 0 人/);
+  assert.match(html, /显示 1 \/ 30 条/);
+  assert.equal((html.match(/class="panel-scroll" tabindex="0" role="region"/g) ?? []).length, 3);
+  assert.match(html, /max-height:min\(320px,50dvh\)/);
+  assert.match(html, /overflow-y:auto/);
+  assert.match(html, /&lt;长请求&gt;/);
+});
+
+test('workbench keeps pagination and headings outside bounded scroll regions', () => {
+  const html = renderDashboard({ page: { task_workbench: true }, workbench: {
+    agents: [], tasks: [{ request: '任务', href: '/tasks/t' }],
+    pagination: { total: 25, totalPages: 2, currentPage: 1, nextHref: '/tasks?page=2' },
+  } });
+  assert.match(html, /class="agent-scroll" tabindex="0" role="region" aria-label="Agent 选项"/);
+  assert.match(html, /显示 1 \/ 25 条/);
+  assert.match(html, /class="task-scroll" tabindex="0" role="region" aria-label="本页任务记录"/);
+  assert.match(html, /<\/div>\s*<nav class="pagination"/);
+  assert.match(html, /max-height:var\(--workspace-height\)/);
+  assert.match(html, /\.detail-content\{min-height:0;overflow-y:auto/);
+  assert.match(html, /\.task-scroll\{min-height:0;overflow-y:auto/);
 });
 
 test('task workbench renders post-audit facts, accessible evidence tabs and closed escaped raw logs', () => {

@@ -34,6 +34,7 @@ import { createToolSemanticMapper } from '../src/auditReview/toolSemanticMapper.
 import { createReviewNotifier } from '../src/auditReview/notification.js';
 import { createVisualization } from '../src/auditReview/visualization.js';
 import { createDashboardAuth } from '../src/auditReview/dashboardAuth.js';
+import { createApiTokenService } from '../src/auditReview/apiTokenService.js';
 import { createAuditReviewScheduler } from '../src/auditReview/scheduler.js';
 import { loadFeishuRuntimeConfig } from '../src/auditReview/feishuConfig.js';
 import { createNotificationDigestScheduler } from '../src/auditReview/notificationDigestScheduler.js';
@@ -210,6 +211,7 @@ const reviewNotifier = createReviewNotifier({
 const reviewVisualization = createVisualization({ db, reviewStore, config: runtimeConfig, llmClient, model: openAIConfig.model });
 const findingLifecycleService = createFindingLifecycleService({ reviewStore, now: () => new Date() });
 const dashboardAuth = createDashboardAuth({ config: runtimeConfig, env: process.env });
+const apiTokenService = createApiTokenService({ db, legacyToken: dashboardAuth.token() });
 const scheduler = createAuditReviewScheduler({
   db,
   config: runtimeConfig,
@@ -287,6 +289,7 @@ if (runtimeConfig.auditReview?.notification?.mode === 'feishu_bot') {
 }
 
 const app = createHttpApp({
+  apiTokenService,
   db,
   config: runtimeConfig,
   runStore,

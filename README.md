@@ -31,7 +31,9 @@
 }
 ```
 
-Dashboard 页面可直接访问，不需要登录。`AUDIT_AGENT_DASHBOARD_TOKEN` 只从进程环境变量读取，用于 `/v1/audit-*` API 的 Bearer 鉴权；如需调用这些 API，请使用高熵随机值，不要复用 LLM API Key。
+Dashboard 页面可直接访问，不需要登录。在右下角点击「API Token」打开侧边栏，填写调用方名称即可申请独立只读 Token。完整 Token 仅创建时展示，请复制保存；调用 `/v1/audit-logs` 时使用 `Authorization: Bearer <Token>`。侧边栏支持停用和查看最近访问记录。
+
+每个 Token 绑定独立服务账号，可读取全部 Agent 日志。访问记录单独保存，不进入 Trace、审查、飞书通知或日报。已有 `AUDIT_AGENT_DASHBOARD_TOKEN` 会迁移为「历史接入账号」，仍可使用并记录访问；停用后重启不会重新启用。
 
 然后执行：
 

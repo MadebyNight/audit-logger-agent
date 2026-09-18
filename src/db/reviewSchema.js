@@ -1,5 +1,26 @@
 // src/db/reviewSchema.js
 export const REVIEW_TABLES = `
+CREATE TABLE IF NOT EXISTS api_service_accounts (
+  account_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  token_prefix TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at TEXT,
+  deleted_at TEXT
+);
+CREATE TABLE IF NOT EXISTS api_access_records (
+  id INTEGER PRIMARY KEY,
+  account_id TEXT,
+  requested_at TEXT NOT NULL,
+  filters_json TEXT NOT NULL,
+  status_code INTEGER NOT NULL,
+  trace_count INTEGER NOT NULL,
+  duration_ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_api_access_account ON api_access_records(account_id, id);
+
 CREATE TABLE IF NOT EXISTS audit_traces (
   agent_id TEXT NOT NULL,
   trace_id TEXT NOT NULL,
@@ -324,6 +345,7 @@ function backfillAuditTraces(db) {
 export function ensureReviewSchema(db) {
   addAuditEventColumns(db);
   db.exec(REVIEW_TABLES);
+  addColumnIfMissing(db, 'api_service_accounts', 'deleted_at', 'TEXT');
   db.transaction(() => backfillAuditTraces(db)).immediate();
   addColumnIfMissing(db, 'audit_review_findings', 'entity_type', 'TEXT');
   addColumnIfMissing(db, 'audit_review_findings', 'entity_id', 'TEXT');
