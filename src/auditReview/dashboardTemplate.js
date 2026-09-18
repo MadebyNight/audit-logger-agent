@@ -2,6 +2,9 @@
 // Renders a complete, self-contained HTML dashboard from a direct-data view model.
 // No browser-side fetch — the template receives fully-populated sections and renders them directly.
 
+import { renderTaskWorkbench } from './workbenchTemplate.js';
+import { renderDataDashboard } from './dataDashboardTemplate.js';
+
 const SEVERITY_TONES = {
   critical: { color: '#B42318', bg: '#fdecea', label: '严重' },
   high: { color: '#C2410C', bg: '#fff1e8', label: '高风险' },
@@ -482,6 +485,30 @@ function lucideChevron() {
   return '<svg class="lucide lucide-chevron-right" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>';
 }
 
+function lucideNavIcon(name) {
+  const paths = {
+    grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+    alert: '<path d="m10.3 3.9-8.1 14a2 2 0 0 0 1.7 3h16.2a2 2 0 0 0 1.7-3l-8.1-14a2 2 0 0 0-3.4 0M12 9v4m0 4h.01"/>',
+    layers: '<path d="m12 3 10 5-10 5L2 8Zm-10 9 10 5 10-5M2 16l10 5 10-5"/>',
+    file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Zm0 0v6h6M8 13h8m-8 4h6"/>',
+  };
+  return `<svg class="lucide" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths[name] ?? paths.file}</svg>`;
+}
+
+function renderLegacySidebar(pageTitle) {
+  const active = 'dashboard';
+  const nav = (key, href, label, icon) => `<a class="nav-link${active === key ? ' active' : ''}" href="${href}"${active === key ? ' aria-current="page"' : ''}>${lucideNavIcon(icon)}${label}</a>`;
+  return `<aside class="sidebar">
+    <a href="/" class="brand"><span class="brand-mark">${lucideNavIcon('layers')}</span>Audit Logger</a>
+    <div class="workspace">任务审计<span>请求、结果与完整证据</span></div>
+    <nav aria-label="主导航">
+      ${nav('dashboard', '/', '数据看板', 'grid')}
+      ${nav('tasks', '/tasks', '任务工作台', 'file')}
+    </nav>
+    <div class="sidebar-note">以日志记录为依据<br>查看任务结果与审计结论</div>
+  </aside>`;
+}
+
 function renderTaskRows(tasks = []) {
   if (!tasks.length) return '<p class="empty-state">暂无任务</p>';
   return tasks.map((task) => `<a class="task-row" href="${escapeHtml(task.href)}">
@@ -644,6 +671,8 @@ function renderErrorState(message) {
 }
 
 export function renderDashboard(templateInput) {
+  if (templateInput?.page?.data_dashboard) return renderDataDashboard(templateInput);
+  if (templateInput?.page?.task_workbench) return renderTaskWorkbench(templateInput, escapeHtml);
   const page = templateInput?.page ?? {};
   const title = escapeHtml(page.title ?? '审计看板');
   const subtitle = escapeHtml(page.subtitle ?? '');
@@ -1560,30 +1589,76 @@ a.row:hover { background: var(--surface-subtle); }
   .row .name { flex: 1 1 100%; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
   .row .time { min-width: 0; }
 }
+.legacy-dashboard {
+  --surface-canvas: #0B0F14; --surface-panel: #111926; --surface-subtle: #0E141C;
+  --text-primary: #E6EDF3; --text-secondary: #9FB0BF; --border-default: #1C2531;
+  --action-primary: #7EB6E8; --action-primary-hover: #A3CCF0;
+  --status-neutral: #9FB0BF; --status-neutral-bg: #151C26;
+  --status-high: #F0616D; --status-high-bg: #2A1216;
+  --status-medium: #FFB454; --status-medium-bg: #241A0F;
+  --status-success: #3FD68F; --status-success-bg: #0F2A20;
+  --bg: #0B0F14; --surface: #111926; --surface-muted: #17212E;
+  --text: #E6EDF3; --text-muted: #9FB0BF; --border: #1C2531; --accent: #B9F4D0;
+  background: var(--surface-canvas); color: var(--text-primary); font-size: 16px;
+}
+.legacy-dashboard .legacy-shell { display: grid; grid-template-columns: 204px minmax(0, 1fr); min-height: 100vh; }
+.legacy-dashboard .sidebar { padding: 31px 20px 22px; border-right: 1px solid var(--border-default); display: flex; flex-direction: column; background: #0E151F; }
+.legacy-dashboard .brand { display: flex; align-items: center; gap: 10px; color: var(--text-primary); font-size: 16px; font-weight: 700; text-decoration: none; }
+.legacy-dashboard .brand-mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; color: #173026; background: var(--accent); }
+.legacy-dashboard .workspace { margin: 26px 0 28px; padding: 12px 10px; border: 1px solid var(--border-default); border-radius: 8px; font-size: 16px; }
+.legacy-dashboard .workspace span { display: block; color: var(--text-secondary); font-size: 14px; }
+.legacy-dashboard .nav-link { display: flex; align-items: center; gap: 10px; margin: 4px 0; padding: 11px 12px; border-radius: 7px; color: var(--text-secondary); font-size: 16px; text-decoration: none; }
+.legacy-dashboard .nav-link.active { background: #22352D; color: var(--accent); }
+.legacy-dashboard .nav-link:hover { background: #17212E; text-decoration: none; }
+.legacy-dashboard .sidebar-note { margin-top: auto; padding: 80px 8px 0; color: var(--text-secondary); font-size: 14px; line-height: 1.7; }
+.legacy-dashboard .legacy-main { min-width: 0; padding: 0 34px 28px; }
+.legacy-dashboard .legacy-topbar { min-height: 68px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--border-default); color: var(--text-secondary); font-size: 14px; }
+.legacy-dashboard .legacy-topbar a { color: var(--text-secondary); }
+.legacy-dashboard .legacy-topbar-context { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
+.legacy-dashboard .legacy-mobile-nav { display: none; }
+.legacy-dashboard .container { max-width: 1180px; margin: 0; padding: 28px 0 0; }
+.legacy-dashboard .context-header { margin-bottom: 24px; }
+.legacy-dashboard .page-title { font-size: clamp(24px, 3vw, 32px); }
+.legacy-dashboard .page-subtitle, .legacy-dashboard .breadcrumbs { font-size: 16px; }
+.legacy-dashboard .summary-metrics { margin-bottom: 24px; }
+.legacy-dashboard .summary-metric { min-height: 104px; padding: 18px; }
+.legacy-dashboard .metric-value { font-size: 32px; }
+.legacy-dashboard .metric-label, .legacy-dashboard .filter-label, .legacy-dashboard .section-summary-hint { font-size: 14px; }
+.legacy-dashboard .filter-option, .legacy-dashboard .filter-clear, .legacy-dashboard .filter-clear-all { min-height: 38px; font-size: 16px; }
+.legacy-dashboard .data-section { margin-bottom: 18px; padding: 20px; background: var(--surface-panel); border-color: var(--border-default); }
+.legacy-dashboard .section-title, .legacy-dashboard .data-section h3 { font-size: 20px; }
+.legacy-dashboard .data-table, .legacy-dashboard .metadata-block, .legacy-dashboard .callout-body, .legacy-dashboard .trace-step-summary, .legacy-dashboard .trace-analysis-block p, .legacy-dashboard .trace-analysis-block ul, .legacy-dashboard .confirmation-description, .legacy-dashboard .confirmation-row dd, .legacy-dashboard .notice-body, .legacy-dashboard .empty-state, .legacy-dashboard .error-state { font-size: 16px; }
+.legacy-dashboard .data-table th, .legacy-dashboard .data-table td { padding: 14px 12px; }
+.legacy-dashboard .data-table th, .legacy-dashboard .cell-secondary, .legacy-dashboard .meta-key, .legacy-dashboard .trace-step-event, .legacy-dashboard .trace-step-meta, .legacy-dashboard .trace-analysis-label, .legacy-dashboard .trace-analysis-model, .legacy-dashboard .confirmation-row dt, .legacy-dashboard .raw-log-label { font-size: 14px; }
+.legacy-dashboard .context-badge, .legacy-dashboard .status-tag, .legacy-dashboard .notification-status, .legacy-dashboard .form-field, .legacy-dashboard .pagination-status, .legacy-dashboard .trace-step-index { font-size: 14px; }
+.legacy-dashboard .raw-log-pre { font-size: 14px; }
+.legacy-dashboard .page-action, .legacy-dashboard .form-submit, .legacy-dashboard .confirmation-cancel { font-size: 16px; }
+.legacy-dashboard footer { padding: 20px 0 0; color: var(--text-secondary); font-size: 14px; text-align: left; }
+@media (max-width: 850px) {
+  .legacy-dashboard .legacy-shell { grid-template-columns: 1fr; }
+  .legacy-dashboard .sidebar { display: none; }
+  .legacy-dashboard .legacy-main { padding: 0 20px 24px; }
+  .legacy-dashboard .legacy-topbar { align-items: flex-start; flex-direction: column; justify-content: center; padding: 12px 0; }
+  .legacy-dashboard .legacy-topbar-context { justify-content: flex-start; }
+  .legacy-dashboard .legacy-mobile-nav { display: flex; flex-wrap: wrap; gap: 18px; padding-top: 14px; font-size: 16px; color: var(--text-secondary); }
+}
+@media (max-width: 720px) {
+  .legacy-dashboard .legacy-main { padding-inline: 14px; }
+  .legacy-dashboard .container { padding-top: 22px; }
+  .legacy-dashboard .data-section { padding: 16px; }
+  .legacy-dashboard .page-title { font-size: 24px; }
+  .legacy-dashboard .data-table { min-width: 520px; }
+}
 </style>
 </head>
-<body${page.task_audit ? ' class="task-audit"' : ''}>
+<body${page.task_audit ? ' class="task-audit"' : ' class="legacy-dashboard"'}>
 <a class="skip-link" href="#main-content">跳到主要内容</a>
-<header class="app-bar">
-  <div class="app-bar-shell">
-    <div class="app-identity">
-      <a href="/" class="app-brand">Audit Logger Agent</a>
-      <span class="app-separator" aria-hidden="true">/</span>
-      <span class="app-page">${title}</span>
-    </div>
-    <nav class="app-nav" aria-label="主导航">
-      <a href="/" class="app-nav-link">Agent</a>
-      <a href="/dashboard#pending_findings" class="app-nav-link">风险发现</a>
-      <a href="/dashboard#reviews_with_findings" class="app-nav-link">审查批次</a>
-    </nav>
-    <div class="app-meta">
-      ${notificationStatus}
-      ${contextBadges}
-      <span class="updated-at">更新时间：${updatedAt}</span>
-    </div>
-  </div>
-</header>
-<main id="main-content" class="container">
+<div class="legacy-shell">
+  ${renderLegacySidebar(title)}
+  <main id="main-content" class="legacy-main">
+    <header class="legacy-topbar"><span>审计空间 <span aria-hidden="true">/</span> ${title}</span><div class="legacy-topbar-context">${notificationStatus}${contextBadges}<span>更新时间：${updatedAt}</span></div></header>
+    <nav class="legacy-mobile-nav" aria-label="主导航"><a href="/">数据看板</a><a href="/tasks">任务工作台</a></nav>
+<div class="container">
   <header class="context-header">
     <div class="context-copy">
       ${breadcrumbs}
@@ -1596,8 +1671,10 @@ a.row:hover { background: var(--surface-subtle); }
   ${notices}
   ${filters}
   ${sections}
-</main>
-<footer>audit-logger-agent 审计看板</footer>
+</div>
+<footer>日志审计 · 以原始请求、执行结果与完整证据为依据。时间均为北京时间（UTC+8）。</footer>
+  </main>
+</div>
 ${templateInput?.sections?.some((section) => section.type === 'requester_groups') ? `<script>
 document.querySelectorAll('[data-group-expand]').forEach(function(button) {
   button.addEventListener('click', function() {

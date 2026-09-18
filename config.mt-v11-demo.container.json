@@ -1,0 +1,129 @@
+{
+  "dataDir": "/app/data",
+  "dbPath": "/app/data/db/audit.db",
+  "agents": {
+    "mt-agent-pi-demo": {
+      "ingestMode": "strict"
+    }
+  },
+  "ingest": {
+    "defaultMode": "strict",
+    "http": {
+      "enabled": true,
+      "maxBodyBytes": 1048576,
+      "maxLineBytes": 65536
+    },
+    "spoolDir": "/app/data/spool/incoming"
+  },
+  "capturesDir": "/app/data/captures",
+  "tmpDir": "/app/data/tmp",
+  "logDir": "/app/data/logs",
+  "limits": {
+    "maxLineBytes": 65536,
+    "maxChunkBytes": 16777216,
+    "maxQueryLimit": 1000,
+    "maxBodyBytes": 1048576
+  },
+  "report": {
+    "timezoneOffsetMinutes": 480
+  },
+  "retention": {
+    "enabled": false
+  },
+  "auditReview": {
+    "enabled": false,
+    "intervalMinutes": 30,
+    "initialDelaySeconds": 30,
+    "lookbackOverlapMinutes": 5,
+    "maxEventsPerReview": 500,
+    "traceReview": {
+      "idleTimeoutMinutes": 60,
+      "waitingUserTimeoutMinutes": 1440,
+      "maxEventsPerTrace": 2000,
+      "maxInvalidOutputRetries": 2
+    },
+    "notification": {
+      "enabled": false,
+      "mode": "disabled",
+      "feishuMode": "disabled",
+      "dailyReport": {
+        "enabled": false
+      }
+    },
+    "http": {
+      "bindHost": "0.0.0.0",
+      "requireDashboardToken": false,
+      "requireHttpsBaseUrl": false,
+      "allowedOrigins": []
+    },
+    "riskPolicy": {
+      "version": "risk-policy-v2",
+      "repeatWindowMinutes": 10,
+      "repeatThreshold": 5,
+      "slowCallDurationMs": 30000,
+      "traceToolChainStepThreshold": 50,
+      "highRiskToolPatterns": [
+        "*delete*",
+        "*write*",
+        "*update*",
+        "*deploy*",
+        "*permission*",
+        "*credential*",
+        "shell.*",
+        "browser.runScript"
+      ],
+      "highRiskMappedToolTypes": [
+        "write",
+        "update",
+        "delete",
+        "deploy",
+        "permission",
+        "credential",
+        "shell"
+      ],
+      "agentToolAllowlists": {
+        "rental-price-agent": [],
+        "mt-agent": [],
+        "mt-agent-pi-demo": []
+      }
+    },
+    "toolMapping": {
+      "version": "tool-semantic-mapping-v1",
+      "taxonomy": [
+        "read",
+        "write",
+        "update",
+        "delete",
+        "deploy",
+        "permission",
+        "credential",
+        "shell",
+        "browser",
+        "network",
+        "database",
+        "file",
+        "notification",
+        "llm",
+        "unknown"
+      ]
+    },
+    "llmReview": {
+      "promptVersion": "audit-review-prompt-v1",
+      "reviewerVersion": "audit-reviewer-v1",
+      "maxCandidatesPerCall": 12
+    },
+    "llmBudget": {
+      "maxCallsPerDay": 500,
+      "maxTokensPerDay": 2000000,
+      "maxConcurrency": 2,
+      "cacheDetailAnalysis": true
+    },
+    "visualization": {
+      "enabled": true,
+      "baseUrl": "",
+      "dashboardPath": "/dashboard",
+      "template": "audit-review-dashboard-v1",
+      "attachDashboardUrlToFeishu": false
+    }
+  }
+}

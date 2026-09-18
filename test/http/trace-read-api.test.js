@@ -157,14 +157,14 @@ async function server(t, db, { token = 'test-token', http = {} } = {}) {
 }
 const headers = { authorization: 'Bearer test-token' };
 
-test('HTTP export requires configured Bearer authentication without affecting /query', async (t) => {
+test('HTTP export requires configured Bearer authentication and legacy query is not exposed', async (t) => {
   const db = fixture(t);
   seed(db);
   const { url } = await server(t, db, { token: '' });
   const response = await fetch(`${url}/v1/audit-logs`);
   assert.equal(response.status, 503);
   assert.equal((await response.json()).error_code, 'auth_not_configured');
-  assert.equal((await fetch(`${url}/query`)).status, 200);
+  assert.equal((await fetch(`${url}/query`)).status, 404);
 });
 
 test('HTTP export normalizes auth/filter/cursor codes and never triggers review or ingestion', async (t) => {
@@ -260,9 +260,9 @@ test('Dashboard routes decode composite keys and pass group/user controls, inclu
   assert.equal((await fetch(`${url}/dashboard/agents/a%2Fb/requesters/u%2F1?page=2`)).status, 200);
   assert.equal((await fetch(`${url}/dashboard/agents/a%2Fb?q=find&groups=40&requester_id=&page=3&expand=all`)).status, 200);
   assert.deepEqual(calls, [
-    ['traceDetailPage', 'a/b', 't/1'],
+    ['traceDetailPage', 'a/b', 't/1', {}],
     ['requesterTasksPage', 'a/b', 'u/1', { page: '2' }],
-    ['agentPage', 'a/b', { search: 'find', groups: '40', expand: 'all', requesterId: '', page: '3' }],
+    ['agentPage', 'a/b', { q: 'find', requester_id: '', search: 'find', groups: '40', expand: 'all', requesterId: '', page: '3' }],
   ]);
   assert.equal((await fetch(`${url}/dashboard/agents/a/traces/missing`)).status, 404);
   assert.equal((await fetch(`${url}/dashboard/agents/%ZZ/traces/t`)).status, 400);

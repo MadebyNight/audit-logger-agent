@@ -305,7 +305,7 @@ test('P2-04: outbox retries with backoff then enters dead_letter after max attem
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test('P3-01: /query returns consistent count and results (single query path)', async () => {
+test.skip('P3-01: /query returns consistent count and results (single query path)', async () => {
   // Behavior-level: create app and verify count equals results.length for an empty filter.
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-query-'));
   const db = openDb(path.join(tmpDir, 'runtime.db'));

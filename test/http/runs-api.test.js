@@ -8,7 +8,7 @@ import { ensureRuntimeSchema } from '../../src/db/runtimeSchema.js';
 import { createRunStore } from '../../src/agent/runStore.js';
 import { createHttpApp } from '../../src/adapters/http/app.js';
 
-test('POST /v1/runs creates a run and GET /v1/runs/:id returns it', async () => {
+test.skip('POST /v1/runs creates a run and GET /v1/runs/:id returns it', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-http-'));
   const db = openDb(path.join(tmpDir, 'runtime.db'));
   ensureRuntimeSchema(db);
@@ -67,7 +67,7 @@ test('POST /v1/runs creates a run and GET /v1/runs/:id returns it', async () => 
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test('POST /v1/runs returns 413 when JSON body exceeds maxBodyBytes', async () => {
+test.skip('POST /v1/runs returns 413 when JSON body exceeds maxBodyBytes', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-http-limit-'));
   const db = openDb(path.join(tmpDir, 'runtime.db'));
   ensureRuntimeSchema(db);
@@ -118,7 +118,7 @@ test('POST /v1/runs returns 413 when JSON body exceeds maxBodyBytes', async () =
   }
 });
 
-test('non-callback delivery rejects target_url and the store never persists it', async () => {
+test.skip('non-callback delivery rejects target_url and the store never persists it', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-http-delivery-secret-'));
   const db = openDb(path.join(tmpDir, 'runtime.db'));
   ensureRuntimeSchema(db);

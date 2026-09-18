@@ -20,14 +20,12 @@ import { createLlmReviewer } from '../src/auditReview/llmReviewer.js';
 import { createToolSemanticMapper } from '../src/auditReview/toolSemanticMapper.js';
 import { createReviewNotifier } from '../src/auditReview/notification.js';
 import { createVisualization } from '../src/auditReview/visualization.js';
-import { createDashboardAuth } from '../src/auditReview/dashboardAuth.js';
 import { createAuditReviewScheduler } from '../src/auditReview/scheduler.js';
 import { createHttpApp } from '../src/adapters/http/app.js';
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(SCRIPT_DIR, '..');
 const DEFAULT_OUTPUT_DIR = path.join(PROJECT_ROOT, 'data', 'tmp', 'benchmark');
-const BENCHMARK_TOKEN = 'audit-benchmark-local-token';
 const DEFAULT_OPTIONS = Object.freeze({
   rounds: 5,
   warmupRounds: 1,
@@ -422,20 +420,11 @@ async function runRound({ round, eventsPerRound }) {
       auditLogger: { log: async () => {} },
       now: () => new Date(benchmarkNow.getTime()),
     });
-    const dashboardAuth = createDashboardAuth({
-      config,
-      env: { AUDIT_AGENT_DASHBOARD_TOKEN: BENCHMARK_TOKEN },
-    });
-
     // The production app schedules a review after ingest. The wrapper omits
     // runAfterIngest so the two measured stages do not overlap.
     app = createHttpApp({
       db,
       config,
-      scheduler: { runManual: () => scheduler.runManual() },
-      reviewStore,
-      visualization,
-      dashboardAuth,
       toolSemanticMapper,
     });
     const baseUrl = await listenOnLoopback(app);
@@ -456,23 +445,11 @@ async function runRound({ round, eventsPerRound }) {
     }
 
     const reviewStarted = performance.now();
-    const reviewResponse = await fetch(baseUrl + '/v1/audit-reviews/run', {
-      method: 'POST',
-      headers: { authorization: 'Bearer ' + BENCHMARK_TOKEN },
-    });
+    const reviewResult = await scheduler.runManual();
     const reviewMs = performance.now() - reviewStarted;
-    const reviewPayload = await readJson(reviewResponse, 'POST /v1/audit-reviews/run');
-    if (reviewResponse.status !== 202 || !reviewPayload.review_id) {
-      throw new Error('POST /v1/audit-reviews/run returned ' + reviewResponse.status + ': ' + JSON.stringify(reviewPayload));
-    }
-
-    const reviewDetailResponse = await fetch(
-      baseUrl + '/v1/audit-reviews/' + encodeURIComponent(reviewPayload.review_id),
-      { headers: { authorization: 'Bearer ' + BENCHMARK_TOKEN } },
-    );
-    const reviewRun = await readJson(reviewDetailResponse, 'GET /v1/audit-reviews/:id');
-    if (reviewDetailResponse.status !== 200) {
-      throw new Error('GET /v1/audit-reviews/:id returned ' + reviewDetailResponse.status + ': ' + JSON.stringify(reviewRun));
+    const reviewRun = reviewStore.getRun(reviewResult.reviewId);
+    if (!reviewRun) {
+      throw new Error('Manual review did not persist a review run');
     }
 
     const persistedEventCount = db.prepare('SELECT COUNT(*) AS count FROM audit_events').get().count;
@@ -486,8 +463,7 @@ async function runRound({ round, eventsPerRound }) {
       ingest_rejected: ingestPayload.rejected,
       ingest_events_per_second: rounded((events.length * 1000) / ingestMs),
       review_ms: rounded(reviewMs),
-      review_status_code: reviewResponse.status,
-      review_id: reviewPayload.review_id,
+      review_id: reviewResult.reviewId,
       review_status: reviewRun.status,
       review_service_ms: durationBetween(reviewRun.started_at, reviewRun.finished_at),
       spool_files_scanned: reviewRun.scanned_files,
@@ -527,7 +503,6 @@ function renderCsv(rounds) {
     'ingest_rejected',
     'ingest_events_per_second',
     'review_ms',
-    'review_status_code',
     'review_id',
     'review_status',
     'review_service_ms',
@@ -579,8 +554,7 @@ export async function runBenchmark({
     },
     methodology: {
       ingest_endpoint: 'POST /v1/ingest',
-      review_endpoint: 'POST /v1/audit-reviews/run',
-      review_detail_endpoint: 'GET /v1/audit-reviews/:id',
+      review_execution: 'direct scheduler invocation',
       setup_time_included: false,
       warmup_rounds_excluded_from_metrics: warmups,
       percentile_method: 'nearest-rank',

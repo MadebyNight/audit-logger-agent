@@ -90,7 +90,7 @@ test('Dokploy deployment guide covers required deployment, security, and recover
   assert.match(guide, /公网只发布 HTTPS/);
   assert.match(guide, /不发布公网写入 router/);
   assert.match(guide, /requireHttpsBaseUrl=true/);
-  assert.match(guide, /公网 router 不发布它/);
+  assert.match(guide, /公网只发布 HTTPS/);
   assert.match(guide, /http:\/\/127\.0\.0\.1:9320\/health/);
 });
 

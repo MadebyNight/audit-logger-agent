@@ -54,7 +54,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:9320/health'
 | Agent 日志发送 | `https://<受控写入域名>/v1/ingest` |
 | 容器健康检查 | `http://127.0.0.1:9320/health` |
 
-默认不公开无认证 ingest 和开发用 `/query`；跨网络写入先配置 Traefik 鉴权或受控内网 HTTPS 路由。容器 `requireHttpsBaseUrl=true`，未设置有效 HTTPS 基地址会拒绝启动。详见[部署说明](docs/dokploy-deployment.md)。
+默认不公开无认证 ingest；跨网络写入先配置 Traefik 鉴权或受控内网 HTTPS 路由。容器 `requireHttpsBaseUrl=true`，未设置有效 HTTPS 基地址会拒绝启动。详见[部署说明](docs/dokploy-deployment.md)。
 
 V1.1 以 `(agent_id, trace_id)` 聚合完整任务，Dashboard 按 Agent → 发起用户 → 任务显示；列表状态为“审查中、未审查、需要介入、待确认、已完成”。新接入必填 `requester_id`、`original_request`、`agent_result`（按开始/终止事件条件），`expected_purpose` 可选。历史回填不调用 LLM，保持未审查，不触发告警。
 
@@ -66,11 +66,7 @@ V1.1 以 `(agent_id, trace_id)` 聚合完整任务，Dashboard 按 Agent → 发
 | 入口                   | 用途               |
 | -------------------- | ---------------- |
 | `GET /health`        | 查看服务与数据库健康状态     |
-| `GET /query`         | 本地开发排障，公网不发布 |
 | `GET /v1/audit-logs` | 按 Trace 分页批量读取完整证据 |
-| `GET /report/daily`  | 查看日报             |
-| `GET /report/errors` | 查看错误报表           |
-| `GET /report/tools`  | 查看工具使用统计         |
 | `GET /dashboard`     | 查看 Dashboard     |
 | `POST /v1/ingest`    | 接收其他 Agent 的审计事件 |
 

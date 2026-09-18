@@ -1,6 +1,66 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { renderDashboard } from '../../src/auditReview/dashboardTemplate.js';
+import { renderDataDashboard } from '../../src/auditReview/dataDashboardTemplate.js';
+
+test('数据看板使用柱状趋势，且不显示 Agent 接入卡片', () => {
+  const html = renderDataDashboard({
+    dashboard: {
+      range_label: '最近 7 天',
+      range_links: { seven: '/?range=7', thirty: '/?range=30' },
+      total: 8,
+      completion_rate: '75%',
+      attention_count: 2,
+      pending_count: 1,
+      trend: [{ label: '2026-09-17', short_label: '09-17', total: 3, attention: 1, total_percent: 100, attention_percent: 33 }],
+      agents: [],
+      requesters: [],
+      attention: [],
+    },
+  });
+
+  assert.match(html, /<div class="trend"><div title="2026-09-17：3 个任务，1 个需要关注"><i style="height:100%"><\/i><b style="height:33%"><\/b><span>09-17<\/span><\/div><\/div>/);
+  assert.doesNotMatch(html, /trend-line|polyline|Agent 接入/);
+});
+
+test('task workbench renders post-audit facts, accessible evidence tabs and closed escaped raw logs', () => {
+  const html = renderDashboard({
+    page: { title: '任务工作台', task_workbench: true },
+    workbench: {
+      filters: { q: '<unsafe>', agent_id: 'agent/a', requester: 'id:user', state: 'attention', sort: 'recent' },
+      options: { agents: [{ value: 'agent/a', label: 'Agent A' }], requesters: [{ value: 'id:user', label: 'user' }] },
+      agents: [{ value: '', label: '全部 Agent', count: 1, href: '/' }, { value: 'agent/a', label: 'Agent A', count: 1, href: '/?agent_id=agent%2Fa', selected: true }],
+      stats: [{ key: 'attention', label: '需要关注', count: 1, href: '/?state=attention' }],
+      tasks: [{ trace_id: 't', request: '核查库存', requester: 'user', agent_id: 'agent/a', result: '发现缺货', state: { key: 'attention', text: '需要关注' }, href: '/dashboard/agents/a/traces/t', selected: true }],
+      pagination: { total: 1, totalPages: 1, currentPage: 1 },
+      selected: { trace_id: 't', agent_id: 'a', requester: 'user', request: '核查库存', result: '发现缺货', reason: '库存不足',
+        state: { key: 'attention', text: '需要关注' }, audit_status: '已审计', trace_status_label: '失败', risk: '高风险', review_version: 1,
+        back_href: '/?q=库存&state=attention', evidence_ids: [5], events: [{ id: 5, event: 'tool.end', raw_json: '{"value":"<script>unsafe</script>"}' }] },
+    },
+  });
+  const audit = html.slice(html.indexOf('<section id="panel-audit"'), html.indexOf('<section id="panel-evidence"'));
+  assert.match(audit, /发起人[\s\S]*原始请求[\s\S]*执行结果[\s\S]*审计结论/);
+  assert.match(audit, /发现缺货/);
+  assert.match(audit, /链路结果[\s\S]*失败/);
+  assert.match(html, /role="tab" aria-selected="true" aria-controls="panel-audit"/);
+  assert.match(html, /id="panel-evidence"[^>]* hidden/);
+  assert.match(html, /<details class="raw-log">/);
+  assert.doesNotMatch(html, /<details class="raw-log"[^>]*\bopen\b/);
+  assert.match(html, /href="#evidence-event-0" data-evidence-link/);
+  assert.match(html, /&lt;script&gt;unsafe/);
+  assert.doesNotMatch(html, /<script>unsafe|执行中|等待用户|建议下一步|fetch\(|XMLHttpRequest/);
+  assert.match(html, /method="get" action="\/tasks"/);
+  assert.match(html, /href="\/">[\s\S]*数据看板/);
+  assert.match(html, /href="\/tasks"[\s\S]*任务工作台/);
+  assert.doesNotMatch(html, /风险发现|审查批次|日报与概览/);
+  assert.match(html, /class="agent-nav" aria-label="Agent 列表"/);
+  assert.match(html, /class="agent-item selected" href="\/\?agent_id=agent%2Fa"/);
+  assert.match(html, /\.task-top h3\{font-size:18px/);
+  assert.match(html, /\.task-meta\{font-size:14px/);
+  const taskList = html.slice(html.indexOf('<section class="task-list"'), html.indexOf('<aside class="detail"'));
+  assert.match(taskList, /核查库存[\s\S]*user[\s\S]*agent\/a[\s\S]*最近活动/);
+  assert.doesNotMatch(taskList, /发现缺货|task-result|task-trace|Trace ID/);
+});
 
 test('renderDashboard renders Chinese labels, zh-CN, and no browser fetch', () => {
   const html = renderDashboard({
@@ -17,11 +77,13 @@ test('renderDashboard renders Chinese labels, zh-CN, and no browser fetch', () =
 
   assert.ok(html.includes('lang="zh-CN"'));
   assert.ok(html.includes('<a class="skip-link" href="#main-content">跳到主要内容</a>'));
-  assert.ok(html.includes('<main id="main-content" class="container">'));
+  assert.ok(html.includes('<main id="main-content" class="legacy-main">'));
+  assert.ok(html.includes('<div class="container">'));
   assert.ok(html.includes('<h1 id="page-title" class="page-title">审计审查总览</h1>'));
-  assert.ok(html.includes('<nav class="app-nav" aria-label="主导航">'));
-  assert.ok(html.includes('href="/dashboard#pending_findings"'));
-  assert.ok(html.includes('href="/dashboard#reviews_with_findings"'));
+  assert.ok(html.includes('<aside class="sidebar">'));
+  assert.ok(html.includes('<nav aria-label="主导航">'));
+  assert.ok(html.includes('href="/tasks"'));
+  assert.ok(html.includes('数据看板'));
   assert.ok(html.includes('审计审查总览'));
   assert.ok(html.includes('最新风险发现'));
   assert.equal(html.includes('Data source'), false);
@@ -533,7 +595,7 @@ test('renderDashboard default UI text is readable Chinese without mojibake', () 
   assert.ok(html.includes('审计看板'));
   assert.ok(html.includes('更新时间'));
   assert.ok(html.includes('父 Span parent-1'));
-  assert.ok(html.includes('audit-logger-agent 审计看板'));
+  assert.ok(html.includes('日志审计 · 以原始请求、执行结果与完整证据为依据。'));
   assert.doesNotMatch(html, /(?:涓|楂|椋|闄|浣|淇|鎴|鍏|鈥|椤|瀵|艰|埅|鐖|璋|鐩|閾|捐|矾|寤|妯|鏆|棤|鍙|睍|绀|鐧|诲|綍|璁|块|棶|浠|ょ|墝|鏇|柊|堕|棿|鎬|昏||规||澶|氭|潯|佹|嵁)/);
 });
 
@@ -621,12 +683,11 @@ test('home agent list renders compact rows without health dot, with counts, time
   assert.match(html, /<span class="name">Ticket Agent<\/span>/);
   assert.match(html, /<span class="time">3 天前<\/span>/);
 
-  // 导航三项常驻验证（即使 agent_index 为真）
-  const navLinks = html.match(/class="app-nav-link"/g) ?? [];
-  assert.equal(navLinks.length, 3);
-  assert.match(html, /<a href="\/" class="app-nav-link">Agent<\/a>/);
-  assert.match(html, /<a href="\/dashboard#pending_findings" class="app-nav-link">风险发现<\/a>/);
-  assert.match(html, /<a href="\/dashboard#reviews_with_findings" class="app-nav-link">审查批次<\/a>/);
+  // 工作台侧栏入口常驻验证（即使 agent_index 为真）
+  const navLinks = html.match(/class="nav-link/g) ?? [];
+  assert.equal(navLinks.length, 2);
+  assert.match(html, /<a class="nav-link active" href="\/" aria-current="page">[\s\S]*数据看板<\/a>/);
+  assert.match(html, /<a class="nav-link" href="\/tasks">[\s\S]*任务工作台<\/a>/);
 
   // 720px 及以下媒体查询规则验证
   assert.match(html, /@media \(max-width: 720px\)/);
@@ -718,4 +779,22 @@ test('renderAgentRow prioritizes name and agent_name over agent_id, handles long
 
   // 6. 验证折叠规则确保 not([open]) 时子内容隐藏
   assert.match(html, /\.collapsible-section:not\(\[open\]\)\s*>\s*:not\(summary\)\s*\{\s*display:\s*none;\s*\}/);
+});
+
+test('legacy Dashboard pages reuse the workbench sidebar and readable type scale', () => {
+  const html = renderDashboard({
+    page: { title: '风险发现', updated_at: '2026-09-17T10:30:00.000Z' },
+    sections: [{
+      id: 'pending_findings', type: 'table', title: '待处理风险发现',
+      columns: [{ key: 'title', label: '标题' }], rows: [{ title: '权限异常' }],
+    }],
+  });
+
+  assert.match(html, /<div class="legacy-shell">[\s\S]*<aside class="sidebar">/);
+  assert.match(html, /<a class="nav-link active" href="\/" aria-current="page">[\s\S]*数据看板<\/a>/);
+  assert.match(html, /<a class="nav-link" href="\/tasks">[\s\S]*任务工作台<\/a>/);
+  assert.match(html, /\.legacy-dashboard \{[\s\S]*font-size: 16px;/);
+  assert.match(html, /\.legacy-dashboard \.section-title, \.legacy-dashboard \.data-section h3 \{ font-size: 20px; \}/);
+  assert.match(html, /\.legacy-dashboard \.data-table th, [\s\S]*font-size: 14px;/);
+  assert.match(html, /@media \(max-width: 850px\)[\s\S]*\.legacy-dashboard \.sidebar \{ display: none; \}/);
 });

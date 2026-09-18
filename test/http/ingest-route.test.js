@@ -116,7 +116,7 @@ test('POST /v1/ingest accepts one JSON event, stores it immediately, and ingestS
   });
 });
 
-test('POST /v1/ingest makes accepted events immediately queryable', async () => {
+test('POST /v1/ingest persists accepted events for internal trace aggregation', async () => {
   await withIngestServer(async ({ baseUrl, config, db }) => {
     const response = await fetch(`${baseUrl}/v1/ingest`, {
       method: 'POST',
@@ -128,11 +128,6 @@ test('POST /v1/ingest makes accepted events immediately queryable', async () => 
     assert.deepEqual(await response.json(), { accepted: 1, rejected: 0, errors: [] });
     assert.match(readSpool(config, 'remote-agent'), /query-immediate/);
 
-    const queryResponse = await fetch(`${baseUrl}/query?trace_id=query-immediate&limit=5`);
-    assert.equal(queryResponse.status, 200);
-    const queryBody = await queryResponse.json();
-    assert.equal(queryBody.count, 1);
-    assert.equal(queryBody.results[0].trace_id, 'query-immediate');
     assert.equal(
       db.prepare('SELECT COUNT(*) AS count FROM audit_events WHERE trace_id = ?').get('query-immediate').count,
       1

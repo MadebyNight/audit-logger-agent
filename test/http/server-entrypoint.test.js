@@ -312,6 +312,79 @@ test('getRuntimePaths merges partial config.paths overrides with normalized defa
 });
 
 
+test('real server entrypoint renders stored post-audit tasks and Trace detail tabs', { timeout: 20000 }, async () => {
+  const { fork } = await import('node:child_process');
+  const { once } = await import('node:events');
+  const net = await import('node:net');
+  const { openDb } = await import('../../scripts/lib/db.js');
+  const { ensureReviewSchema } = await import('../../src/db/reviewSchema.js');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-workbench-entrypoint-'));
+  const dbPath = path.join(tmp, 'audit.db');
+  const configPath = path.join(tmp, 'config.json');
+  let child;
+  let output = '';
+  try {
+    const db = openDb(dbPath);
+    try {
+      ensureReviewSchema(db);
+      db.prepare(`INSERT INTO audit_events
+        (row_hash, ts, agent_id, trace_id, span_id, event, tool_name, status, raw_json)
+        VALUES ('entrypoint-event', '2026-09-17T10:00:00Z', 'entry-agent', 'entry/trace#1',
+          'span-1', 'run.final_result', 'task', 'OK', '{"entrypoint_evidence":true}')`).run();
+      db.prepare(`INSERT INTO audit_traces
+        (agent_id, trace_id, requester_id, original_request, agent_result, trace_status,
+          risk_level, risk_reason, sealed_at, sealed_reason, review_version, last_event_at, updated_at)
+        VALUES ('entry-agent', 'entry/trace#1', '入口用户', '核对入口库存', '库存核对完成',
+          'success', 'none', '已核对完整结果', '2026-09-17T10:00:00Z', 'terminal_event', 1,
+          '2026-09-17T10:00:00Z', '2026-09-17T10:00:00Z')`).run();
+    } finally { db.close(); }
+    fs.writeFileSync(configPath, JSON.stringify({
+      rootDir: tmp, dbPath, agents: {},
+      ingest: { http: { enabled: false } }, retention: { enabled: false },
+      auditReview: { enabled: false, http: { bindHost: '127.0.0.1' }, notification: { enabled: false } },
+    }));
+    const probe = net.createServer();
+    probe.listen(0, '127.0.0.1');
+    await once(probe, 'listening');
+    const port = probe.address().port;
+    await new Promise((resolve) => probe.close(resolve));
+    const bridge = 'data:text/javascript,process.on("message",m=>{if(m==="shutdown")process.emit("SIGTERM")})';
+    child = fork(path.resolve('scripts/server.js'), ['--port', String(port), '--bind', '127.0.0.1'], {
+      execArgv: ['--import', bridge], silent: true,
+      env: { ...process.env, AUDIT_AGENT_CONFIG_PATH: configPath,
+        AUDIT_AGENT_LLM_API_KEY: 'local-test-only', AUDIT_AGENT_LLM_MODEL: 'test-model',
+        AUDIT_AGENT_LLM_BASE_URL: 'http://127.0.0.1:1/v1', AUDIT_AGENT_FEISHU_MODE: 'disabled' },
+    });
+    child.stdout.on('data', (data) => { output += data; });
+    child.stderr.on('data', (data) => { output += data; });
+    const base = `http://127.0.0.1:${port}`;
+    let ready = false;
+    for (let i = 0; i < 100; i++) {
+      if (child.exitCode !== null) assert.fail(output);
+      try { if ((await fetch(`${base}/health`)).ok) { ready = true; break; } } catch {}
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(ready, `server did not start: ${output}`);
+    for (const route of ['/', `/dashboard/agents/entry-agent/traces/${encodeURIComponent('entry/trace#1')}`]) {
+      const response = await fetch(`${base}${route}`);
+      assert.equal(response.status, 200, `real entrypoint response for ${route}`);
+      const html = await response.text();
+      assert.ok(html.includes('核对入口库存'), `${route} must render the stored task, not an empty list`);
+      assert.ok(html.includes('入口用户') && html.includes('库存核对完成'), `${route} must render real task context`);
+      assert.ok(html.includes('id="tab-audit"') && html.includes('id="tab-evidence"'), `${route} must render both detail tabs`);
+      assert.ok(html.includes('entrypoint_evidence'), `${route} must render the stored raw evidence`);
+    }
+    assert.doesNotMatch(output, /Audit review scheduler started|Retention scheduler started/);
+  } finally {
+    if (child && child.exitCode === null) {
+      const exited = once(child, 'exit');
+      child.send('shutdown');
+      await exited;
+    }
+    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  }
+});
+
 test('real server ingests and reviews a Trace, restarts without backfill, and shuts down cleanly', { timeout: 20000 }, async () => {
   const { fork } = await import('node:child_process');
   const { once } = await import('node:events');
@@ -373,8 +446,7 @@ test('real server ingests and reviews a Trace, restarts without backfill, and sh
     const accepted = await response.json();
     assert.equal(response.status, 202, JSON.stringify(accepted));
     assert.equal(accepted.accepted, 1, JSON.stringify(accepted));
-    const manual = await fetch(`${base}/v1/audit-reviews/run`, { method: 'POST', headers: { authorization: 'Bearer test-token' } });
-    assert.equal(manual.status, 202, await manual.text());
+    await new Promise((resolve) => setTimeout(resolve, 200));
     await stop();
     db = new Database(dbPath);
     const first = db.prepare("SELECT * FROM audit_traces WHERE agent_id = 'lifecycle-agent'").get();

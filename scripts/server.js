@@ -207,7 +207,7 @@ const reviewNotifier = createReviewNotifier({
   config: runtimeConfig,
   feishuMode: feishuRuntimeConfig.mode,
 });
-const reviewVisualization = createVisualization({ reviewStore, config: runtimeConfig, llmClient, model: openAIConfig.model });
+const reviewVisualization = createVisualization({ db, reviewStore, config: runtimeConfig, llmClient, model: openAIConfig.model });
 const findingLifecycleService = createFindingLifecycleService({ reviewStore, now: () => new Date() });
 const dashboardAuth = createDashboardAuth({ config: runtimeConfig, env: process.env });
 const scheduler = createAuditReviewScheduler({

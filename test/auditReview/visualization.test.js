@@ -269,7 +269,7 @@ test('overviewPage returns linked review and finding sections', () => {
   assert.ok(page.sections.find((section) => section.id === 'reviews_without_findings'));
 });
 
-test('agentIndexPage lists received agents linked to requester groups without risk details', () => {
+test('agentIndexPage renders the task workbench and retains received Agent filter options', () => {
   const page = createViz({
     agents: [
       {
@@ -289,31 +289,21 @@ test('agentIndexPage lists received agents linked to requester groups without ri
     ],
   }).agentIndexPage();
 
-  assert.equal(page.page.title, 'Agent 日志入口');
+  assert.equal(page.page.task_workbench, true);
   assert.deepEqual(page.summary_metrics, []);
-  const section = page.sections.find((item) => item.id === 'received_agents');
-  assert.equal(section.title, '已接收日志的 Agent');
-  assert.equal(section.rows[0].agent_id.text, 'agent-1');
-  assert.equal(section.rows[0].agent_id.href, '/dashboard/agents/agent-1');
-  assert.equal(section.rows[0].href, '/dashboard/agents/agent-1');
-  assert.equal('health' in section.rows[0], false);
-  assert.equal(section.rows[0].requester_count, 0);
-  assert.equal(section.rows[0].task_count, 0);
-  assert.equal(section.rows[0].time, '2026-07-03');
-  assert.equal(section.rows[0].last_event_at.text, '2026-07-03');
-  assert.equal(section.rows[0].last_event_at.raw, '2026-07-03T10:02:00.000Z');
-  assert.equal(section.rows[1].agent_id.href, '/dashboard/agents/agent.2');
-  assert.equal('health' in section.rows[1], false);
-  assert.equal(section.rows[1].time, '2026-07-03');
-  assert.doesNotMatch(JSON.stringify(page.sections), /finding|severity|risk_level/);
-  assert.deepEqual(page.page.page_actions, []);
+  assert.ok(page.workbench.options.agents.some((option) => option.value === 'agent-1'));
+  assert.ok(page.workbench.options.agents.some((option) => option.value === 'agent.2'));
+  assert.deepEqual(page.workbench.tasks, []);
+  assert.equal(page.workbench.selected, null);
   const html = renderDashboard(page);
-  assert.doesNotMatch(html, /查看全部审计|id="pending_findings"|id="reviews_with_findings"/);
-  assert.match(html, /href="\/dashboard\/agents\/agent-1"/);
+  assert.match(html, /数据看板/);
+  assert.doesNotMatch(html, /风险发现|审查批次/);
 });
 
-test('agentIndexPage derives requester count, task count and picks latest event time between agent and traces', () => {
+test('agentIndexPage builds global filters from every Agent and groups missing requester identities', () => {
   const fakeTraceStore = {
+    getTrace(agentId, traceId) { return this.listTraces({ agentId }).find((trace) => trace.trace_id === traceId); },
+    listTraceEvents() { return []; },
     listTraces({ agentId }) {
       if (agentId === 'agent-traces') {
         return [
@@ -403,32 +393,13 @@ test('agentIndexPage derives requester count, task count and picks latest event 
   });
 
   const page = viz.agentIndexPage({ now: '2026-07-04T12:00:00.000Z' });
-  const rows = page.sections[0].rows;
-
-  // 1. requester_count: u-1 一组，null 和 '' 归入“发起人未知”一组，共 2 组；任务数 4
-  assert.equal(rows[0].requester_count, 2);
-  assert.equal(rows[0].task_count, 4);
-  assert.equal(rows[0].last_event_at.raw, '2026-07-03T12:00:00.000Z');
-  assert.equal('health' in rows[0], false);
-
-  // 2. trace 时间更新时：正确选取 trace 的最新时间 15:00
-  assert.equal(rows[1].requester_count, 1);
-  assert.equal(rows[1].task_count, 1);
-  assert.equal(rows[1].last_event_at.raw, '2026-07-03T15:00:00.000Z');
-  assert.equal('health' in rows[1], false);
-
-  // 3. agent.last_event_at（新入库日志）更新时：不因已有旧 trace 遗漏新事件，取 14:30
-  assert.equal(rows[2].requester_count, 1);
-  assert.equal(rows[2].task_count, 1);
-  assert.equal(rows[2].last_event_at.raw, '2026-07-03T14:30:00.000Z');
-  assert.equal('health' in rows[2], false);
-
-  // 4. 缺失时间/无数据容错
-  assert.equal(rows[3].last_event_at.raw, '');
-  assert.equal('health' in rows[3], false);
+  assert.equal(page.workbench.pagination.total, 6);
+  assert.equal(page.workbench.options.requesters.filter((option) => option.label === '发起人未知').length, 1);
+  assert.equal(page.workbench.tasks.filter((row) => row.requester === '发起人未知').length, 2);
+  assert.ok(page.workbench.options.agents.some((option) => option.value === 'agent-unknown'));
 });
 
-test('formatRelativeTime and agentIndexPage time field follow relative time rules', () => {
+test('formatRelativeTime follows relative time rules and agents without tasks remain filterable', () => {
   const base = new Date(2026, 8, 14, 15, 0, 0); // 2026-09-14 15:00:00 本地时间
 
   // 1. 今天 => HH:mm
@@ -472,11 +443,8 @@ test('formatRelativeTime and agentIndexPage time field follow relative time rule
     },
   });
   const page = viz.agentIndexPage({ now: base });
-  const rows = page.sections[0].rows;
-  assert.equal(rows[0].time, '14:48');
-  assert.equal(rows[1].time, '昨天');
-  assert.equal(rows[2].time, '2 天前');
-  assert.equal(rows[3].time, '2026-09-07');
+  assert.equal(page.workbench.options.agents.filter((option) => option.value.startsWith('agent-')).length, 4);
+  assert.equal(page.workbench.tasks.length, 0);
 });
 
 test('manualDailyReportPage returns a server-rendered Beijing-time confirmation model', () => {
@@ -1200,8 +1168,9 @@ test('visualization view models remain server-renderable data only', () => {
 function taskViz(traces, events = []) {
   return createVisualization({
     config: { auditReview: { visualization: { baseUrl: 'https://audit.example', dashboardPath: '/dashboard' } } },
+    reviewStore: { listAgents: () => [...new Set(traces.map((trace) => trace.agent_id))].map((agent_id) => ({ agent_id })) },
     traceStore: {
-      listTraces({ agentId }) { return traces.filter((trace) => trace.agent_id === agentId); },
+      listTraces({ agentId } = {}) { return traces.filter((trace) => !agentId || trace.agent_id === agentId); },
       getTrace(agentId, traceId) { return traces.find((trace) => trace.agent_id === agentId && trace.trace_id === traceId) ?? null; },
       listTraceEvents({ agentId, traceId }) { return events.filter((event) => event.agent_id === agentId && event.trace_id === traceId); },
     },
@@ -1214,60 +1183,64 @@ function task(overrides = {}) {
     last_event_at: '2026-09-14T01:00:00Z', context_status: 'complete', ...overrides };
 }
 
-test('task action states use seal and review axes before risk, with five fixed labels', () => {
+test('post-audit workbench excludes first unsealed tasks but preserves reviewed reopening and sealed history', () => {
   const traces = [
     task({ trace_id: 'a', sealed_at: null, risk_level: 'high' }),
     task({ trace_id: 'b', review_version: 0, risk_level: 'unreviewed' }),
     task({ trace_id: 'c', trace_status: 'interrupted', risk_level: 'high' }),
     task({ trace_id: 'd', trace_status: 'incomplete', risk_level: 'low' }),
     task({ trace_id: 'e', risk_level: 'medium' }),
+    task({ trace_id: 'running', sealed_at: null, review_version: 0, trace_status: 'pending' }),
   ];
   const page = taskViz(traces).requesterTasksPage('agent/一', 'user-1');
-  assert.deepEqual(page.sections[0].tasks.map((row) => row.state.text), ['审查中', '未审查', '需要介入', '待确认', '已完成']);
-  assert.match(page.page.subtitle, /1 条需要介入/);
-  assert.doesNotMatch(JSON.stringify(page.sections), /成功|失败|高风险|中风险|低风险|trace_status/);
+  const states = Object.fromEntries(page.workbench.tasks.map((row) => [row.trace_id, row.state.key]));
+  assert.deepEqual(states, { a: 'attention', c: 'attention', d: 'pending', e: 'done', b: 'unreviewed' });
+  assert.equal(page.workbench.pagination.total, 5);
+  assert.doesNotMatch(JSON.stringify(page.workbench), /执行中|等待用户|建议下一步/);
 });
 
-test('requester groups search full collection, render first 20, preserve unknown identity and paginate tasks', () => {
+test('workbench searches all tasks and composes filters before pagination with unknown requester support', () => {
   const traces = Array.from({ length: 25 }, (_, index) => task({ trace_id: `t${index}`, requester_id: `u${index}`, requester_name: `姓名${index}` }));
   traces.push(task({ trace_id: 'unknown', requester_id: null, user_id: 'must-not-be-used' }));
   const viz = taskViz(traces);
-  const first = viz.agentPage('agent/一').sections[0];
-  assert.equal(first.groups.length, 20);
-  assert.equal(first.groups.filter((group) => group.open).length, 1);
-  assert.match(first.moreHref, /groups=40/);
-  assert.equal(viz.agentPage('agent/一', { groups: 40 }).sections[0].groups.length, 26);
-  assert.equal(viz.agentPage('agent/一', { search: '姓名24' }).sections[0].groups[0].requester_id, 'u24');
-  assert.equal(viz.agentPage('agent/一', { search: 'u24' }).sections[0].groups.length, 1);
-  assert.equal(viz.agentPage('agent/一', { search: '发起人未知' }).sections[0].groups[0].href, '/dashboard/agents/agent%2F%E4%B8%80?requester_id=');
+  const first = viz.agentPage('agent/一').workbench;
+  assert.equal(first.tasks.length, 20);
+  assert.equal(first.pagination.total, 26);
+  assert.equal(viz.agentPage('agent/一', { q: '姓名24' }).workbench.tasks[0].trace_id, 't24');
+  assert.equal(viz.agentPage('agent/一', { q: 'u24' }).workbench.tasks.length, 1);
+  assert.equal(viz.agentPage('agent/一', { q: '发起人未知' }).workbench.tasks[0].trace_id, 'unknown');
   const many = taskViz(Array.from({ length: 45 }, (_, index) => task({ trace_id: `t${index}` })));
-  const second = many.requesterTasksPage('agent/一', 'user-1', { page: 2 });
-  assert.equal(second.sections[0].tasks.length, 20);
-  assert.equal(second.sections[1].totalPages, 3);
-  assert.match(second.sections[1].nextHref, /page=3$/);
+  const second = many.requesterTasksPage('agent/一', 'user-1', { page: 2, q: '库存', state: 'done', sort: 'recent' }).workbench;
+  assert.equal(second.tasks.length, 20);
+  assert.equal(second.pagination.totalPages, 3);
+  const next = new URL(second.pagination.nextHref, 'https://audit.example');
+  assert.equal(next.searchParams.get('page'), '3');
+  assert.equal(next.searchParams.get('q'), '库存');
+  assert.equal(next.searchParams.get('state'), 'done');
+  assert.equal(next.searchParams.get('sort'), 'recent');
   const unknown = taskViz(Array.from({ length: 25 }, (_, index) => task({ trace_id: `t${index}`, requester_id: null })));
-  assert.equal(unknown.agentPage('agent/一', { requesterId: '', page: 2 }).sections[0].tasks.length, 5);
+  assert.equal(unknown.requesterTasksPage('agent/一', '', { page: 2 }).workbench.tasks.length, 5);
 });
 
-test('trace detail preserves five sections and all ordered events and raw JSON across composite identities', () => {
+test('trace detail keeps first-page facts and complete ordered evidence with composite identity isolation', () => {
   const trace = task({ trace_status: 'interrupted', risk_level: 'high', review_input_sampled: 1, omitted_event_count: 10, expected_purpose: null });
   const events = Array.from({ length: 250 }, (_, index) => ({ agent_id: trace.agent_id, trace_id: trace.trace_id,
     id: 250 - index, ts: trace.last_event_at, event: 'tool.end', raw_json: { marker: 250 - index, text: '<script>unsafe</script>' } }));
   events.push({ agent_id: 'other', trace_id: trace.trace_id, id: 999, raw_json: 'foreign-data' });
   const viz = taskViz([trace, task({ agent_id: 'other' })], events);
   const page = viz.traceDetailPage(trace.agent_id, trace.trace_id);
-  assert.deepEqual(page.sections.map((section) => section.id), ['task_conclusion', 'task_context', 'task_audit_result', 'task_evidence', 'task_raw_logs']);
-  assert.equal(page.sections[3].steps.length, 250);
-  assert.equal(page.sections[4].snippets.length, 250);
-  assert.match(page.sections[4].snippets[0].body, /"marker": 1,/);
-  assert.match(page.sections[4].snippets[249].body, /"marker": 250,/);
-  assert.equal(page.sections[1].items.find((item) => item.label === 'Agent 预期目的').value, '未提供');
+  const detail = page.workbench.selected;
+  assert.equal(detail.requester, 'user-1');
+  assert.equal(detail.request, '检查库存');
+  assert.equal(detail.events.length, 250);
+  assert.equal(JSON.parse(detail.events[0].raw_json).marker, 1);
+  assert.equal(JSON.parse(detail.events[249].raw_json).marker, 250);
   assert.equal(viz.traceDetailPage('missing', trace.trace_id), null);
   const html = renderDashboard(page);
-  assert.match(html, /需要人工介入/);
-  assert.match(html, /审查结论基于采样证据/);
-  assert.match(html, /<details id="task_raw_logs"[^>]*>/);
-  assert.doesNotMatch(html, /<details id="task_raw_logs"[^>]* open|foreign-data|<script>unsafe/);
+  assert.match(html, /需要关注/);
+  assert.match(html, /采样证据/);
+  assert.match(html, /原始日志/);
+  assert.doesNotMatch(html, /foreign-data|<script>unsafe/);
   assert.match(html, /&lt;script&gt;unsafe/);
 });
 
@@ -1277,6 +1250,100 @@ test('dashboard notification links encode agent and trace independently and reta
   assert.equal(viz.dashboardUrlFor('agent/一', 'trace?#一'), expected);
   assert.equal(viz.dashboardUrlFor({ agent_id: 'agent/一', trace_id: 'trace?#一' }), expected);
   assert.equal(viz.dashboardUrlFor('review/1'), 'https://audit.example/dashboard/audit-reviews/review%2F1');
+});
+
+test('workbench combines Agent, requester, keyword and state and counts matching states before state filtering', () => {
+  const viz = taskViz([
+    task({ trace_id: 'match', risk_level: 'high', original_request: '库存导出' }),
+    task({ trace_id: 'completed', risk_level: 'none', original_request: '库存导出' }),
+    task({ trace_id: 'other-user', requester_id: 'user-2', risk_level: 'high', original_request: '库存导出' }),
+    task({ trace_id: 'other-agent', agent_id: 'agent-two', risk_level: 'high', original_request: '库存导出' }),
+    task({ trace_id: 'different-request', risk_level: 'high', original_request: '更新订单' }),
+  ]);
+  const workbench = viz.agentIndexPage({ agent_id: 'agent/一', requester_id: 'user-1', q: '库存', state: 'attention' }).workbench;
+  assert.deepEqual(workbench.tasks.map((row) => row.trace_id), ['match']);
+  assert.equal(workbench.stats.find((stat) => stat.key === 'all').count, 2);
+  assert.equal(workbench.stats.find((stat) => stat.key === 'done').count, 1);
+  const href = new URL(workbench.tasks[0].href, 'https://audit.example');
+  assert.equal(href.searchParams.get('q'), '库存');
+  assert.equal(href.searchParams.get('state'), 'attention');
+});
+
+test('workbench provides an Agent sidebar and limits task rows to the approved record fields', () => {
+  const viz = taskViz([
+    task({ trace_id: 'agent-one-task', agent_id: 'agent-one', requester_id: 'requester-one', original_request: '查询库存', agent_result: '不应出现在任务记录中' }),
+    task({ trace_id: 'agent-two-task', agent_id: 'agent-two', requester_id: 'requester-two', original_request: '查询订单' }),
+  ]);
+  const workbench = viz.agentIndexPage({ agent_id: 'agent-one' }).workbench;
+
+  assert.deepEqual(workbench.agents.map(({ value, label, count, selected }) => ({ value, label, count, selected })), [
+    { value: '', label: '全部 Agent', count: 2, selected: false },
+    { value: 'agent-one', label: 'agent-one', count: 1, selected: true },
+    { value: 'agent-two', label: 'agent-two', count: 1, selected: false },
+  ]);
+  const allAgentsHref = new URL(workbench.agents[0].href, 'https://audit.example');
+  assert.equal(allAgentsHref.searchParams.get('agent_id'), null);
+  assert.equal(allAgentsHref.searchParams.get('requester'), null);
+  const agentOneHref = new URL(workbench.agents[1].href, 'https://audit.example');
+  assert.equal(agentOneHref.searchParams.get('agent_id'), 'agent-one');
+  assert.equal(agentOneHref.searchParams.get('requester'), null);
+
+  const row = workbench.tasks[0];
+  assert.deepEqual(Object.keys(row).sort(), ['agent_id', 'href', 'key', 'request', 'requester', 'selected', 'state', 'time', 'trace_id']);
+  assert.equal(row.request, '查询库存');
+  assert.equal(row.requester, 'requester-one');
+  assert.equal(row.state.text, '已完成');
+  assert.equal(row.agent_id, 'agent-one');
+  assert.equal(row.time, '2026-09-14T01:00:00Z');
+  assert.equal('result' in row, false);
+});
+
+test('reopened and failed rereviews preserve prior conclusions while sealed timeout results stay uncertain', () => {
+  const traces = [
+    task({ trace_id: 'reopened', sealed_at: null, review_version: 2, risk_level: 'high', risk_reason: '已有风险结论', review_error: 'test failure' }),
+    task({ trace_id: 'timeout', review_version: 1, trace_status: 'incomplete', risk_level: 'low', agent_result: null }),
+    task({ trace_id: 'historical', review_version: 0, risk_level: 'unreviewed', trace_status: 'pending' }),
+  ];
+  const viz = taskViz(traces);
+  const rereview = viz.traceDetailPage('agent/一', 'reopened').workbench.selected;
+  assert.equal(rereview.state.key, 'attention');
+  assert.equal(rereview.reason, '已有风险结论');
+  assert.match(JSON.stringify(rereview.notices), /失败|重审|已有/);
+  assert.equal(viz.traceDetailPage('agent/一', 'timeout').workbench.selected.state.key, 'pending');
+  assert.equal(viz.traceDetailPage('agent/一', 'historical').workbench.selected.state.key, 'unreviewed');
+});
+
+test('shared task deep links retain a changed conclusion even when old list filters no longer match', () => {
+  const viz = taskViz([task({ trace_id: 'now-complete', risk_level: 'none', trace_status: 'success' })]);
+  const page = viz.traceDetailPage('agent/一', 'now-complete', { state: 'attention', q: '库存' });
+  assert.ok(page);
+  assert.equal(page.workbench.selected.trace_id, 'now-complete');
+  assert.equal(page.workbench.selected.state.key, 'done');
+  assert.equal(page.workbench.selected.trace_status, 'success');
+  assert.equal(new URL(page.workbench.selected.back_href, 'https://audit.example').searchParams.get('state'), 'attention');
+});
+
+test('unknown requester selection never collides with literal requester IDs', () => {
+  const viz = taskViz([
+    task({ trace_id: 'unknown', requester_id: null }),
+    task({ trace_id: 'literal', requester_id: '__unknown__' }),
+    task({ trace_id: 'literal-unknown', requester_id: 'unknown' }),
+  ]);
+  assert.deepEqual(viz.agentIndexPage({ requester: 'unknown' }).workbench.tasks.map((row) => row.trace_id), ['unknown']);
+  assert.deepEqual(viz.agentIndexPage({ requester: 'id:__unknown__' }).workbench.tasks.map((row) => row.trace_id), ['literal']);
+  assert.deepEqual(viz.agentIndexPage({ requester: 'id:unknown' }).workbench.tasks.map((row) => row.trace_id), ['literal-unknown']);
+  assert.deepEqual(viz.agentPage('agent/一', { requesterId: '' }).workbench.tasks.map((row) => row.trace_id), ['unknown']);
+});
+
+test('workbench read failure is explicit and does not masquerade as an empty successful list', () => {
+  const viz = createVisualization({
+    reviewStore: { listAgents: () => [{ agent_id: 'a' }] },
+    traceStore: { listTraces() { throw new Error('read unavailable'); } },
+  });
+  const page = viz.agentIndexPage();
+  assert.ok(page.workbench.error);
+  const html = renderDashboard(page);
+  assert.match(html, /失败|无法|暂时不可/);
 });
 
 test('task dashboard uses shared read service evidence and audited state from a real database', async (t) => {
@@ -1290,9 +1357,9 @@ test('task dashboard uses shared read service evidence and audited state from a 
     VALUES ('a','2026-09-16','a','same','s','run.final_result','shell','OK','{"nested":{"complete":true}}')`).run();
   const viz = createVisualization({ db });
   const page = viz.traceDetailPage('a', 'same');
-  assert.equal(page.sections[0].items.find((item) => item.label === '风险等级').value, '中风险');
-  assert.deepEqual(JSON.parse(page.sections[4].snippets[0].body), readTraceDetail(db, 'a', 'same').events[0].raw_json);
-  assert.equal(viz.agentPage('a').sections[0].groups[0].tasks[0].state.text, '已完成');
+  assert.equal(page.workbench.selected.risk, '中风险');
+  assert.deepEqual(JSON.parse(page.workbench.selected.events[0].raw_json), readTraceDetail(db, 'a', 'same').events[0].raw_json);
+  assert.equal(viz.agentPage('a').workbench.tasks[0].state.key, 'done');
 });
 
 test('legacy critical Finding projections merge into high without mutating stored evidence', () => {

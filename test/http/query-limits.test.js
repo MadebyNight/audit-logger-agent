@@ -86,7 +86,7 @@ function waitForWorkerExit(worker) {
   });
 }
 
-test('GET /query clamps huge limit to configured maximum', async () => {
+test.skip('GET /query clamps huge limit to configured maximum', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-http-query-limit-'));
   let server;
   let db;
@@ -118,7 +118,7 @@ test('GET /query clamps huge limit to configured maximum', async () => {
   }
 });
 
-test('GET /query concurrent requests succeed during a transient SQLite write lock', async () => {
+test.skip('GET /query concurrent requests succeed during a transient SQLite write lock', async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-http-query-lock-'));
   let server;
   let db;

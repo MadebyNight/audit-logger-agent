@@ -85,13 +85,6 @@ const REVIEWS_TABLE_COLUMNS = [
   { key: 'finished_at', label: '完成时间', priority: 'metadata' },
 ];
 
-const AGENT_INDEX_COLUMNS = [
-  { key: 'agent_id', label: 'Agent ID', priority: 'primary' },
-  { key: 'requester_count', label: '发起人数', priority: 'primary' },
-  { key: 'task_count', label: '任务数', priority: 'primary' },
-  { key: 'last_event_at', label: '最新日志时间', priority: 'secondary' },
-];
-
 const AGENT_LOG_COLUMNS = [
   { key: 'timestamp', label: '时间', priority: 'primary' },
   { key: 'event', label: '事件', priority: 'primary' },
@@ -980,223 +973,249 @@ export function createVisualization({ reviewStore, traceStore, db, config, llmCl
       }));
   }
 
-  function agentIndexPage({ now = Date.now() } = {}) {
-    const agents = listAgents(1000);
-    const updatedAt = nowIso();
-
-    const rows = agents.map((agent) => {
-      const agentId = agent.agent_id ?? '';
-      const traces = agentId ? agentTraces(agentId) : [];
-      const taskCount = traces.length;
-
-      let requesterCount = 0;
-      if (traces.length > 0) {
-        const requesterKeys = new Set();
-        for (const trace of traces) {
-          requesterKeys.add(trace.requester_id || '');
-        }
-        requesterCount = requesterKeys.size;
-      }
-
-      const lastEventAt = pickLatestTime(agent.last_event_at, traces[0]?.last_event_at);
-      const formattedLastEventAt = formatTime(lastEventAt);
-      const relativeTime = formatRelativeTime(lastEventAt, now);
-
-      const agentHref = agentId ? agentDashboardUrl(agentId) : undefined;
-
-      return {
-        agent_id: {
-          text: agentId,
-          href: agentHref,
-          mono: false,
-        },
-        name: agent.agent_name || agentId,
-        href: agentHref,
-        requester_count: requesterCount,
-        task_count: taskCount,
-        last_event_at: {
-          text: relativeTime,
-          raw: formattedLastEventAt,
-          mono: true,
-          toString() { return this.text; },
-        },
-        time: relativeTime,
-      };
-    });
-
-    const sections = rows.length > 0
-      ? [{
-          id: 'received_agents',
-          title: '已接收日志的 Agent',
-          type: 'table',
-          columns: AGENT_INDEX_COLUMNS,
-          rows,
-        }]
-      : [{
-          id: 'empty_agents',
-          title: '暂无 Agent 日志',
-          type: 'callout',
-          body: '当前数据库还没有接收到任何 Agent 日志。日志写入后，这里会展示对应的 Agent ID。',
-        }];
-
-    return {
-      page: {
-        title: 'Agent 日志入口',
-        subtitle: '选择已接收日志的 Agent，进入对应的日志审计结果。',
-        updated_at: updatedAt,
-        breadcrumbs: [{ label: 'Agent 列表', href: '/' }],
-        task_audit: true,
-        agent_index: true,
-        context_badges: [],
-        page_actions: [],
-      },
-      summary_metrics: [],
-      filters: [],
-      sections,
-    };
-  }
-
   function traceUrl(agentId, traceId) {
     return `${agentDashboardUrl(agentId)}/traces/${encodeURIComponent(traceId)}`;
   }
 
-  function requesterUrl(agentId, requesterId) {
-    return requesterId ? `${agentDashboardUrl(agentId)}/requesters/${encodeURIComponent(requesterId)}`
-      : `${agentDashboardUrl(agentId)}?requester_id=`;
-  }
-
   function taskState(trace) {
-    if (!trace.sealed_at) return { text: '审查中', tone: 'neutral' };
-    if (!Number(trace.review_version)) return { text: '未审查', tone: 'neutral' };
-    if (trace.risk_level === 'high') return { text: '需要介入', tone: 'high' };
-    if (trace.trace_status === 'incomplete') return { text: '待确认', tone: 'medium' };
-    return { text: '已完成', tone: 'neutral' };
+    if (!Number(trace.review_version)) return { key: 'unreviewed', text: '未审查', tone: 'neutral' };
+    if (trace.risk_level === 'high') return { key: 'attention', text: '需要关注', tone: 'high' };
+    if (trace.trace_status === 'incomplete') return { key: 'pending', text: '结果待核实', tone: 'medium' };
+    if (trace.trace_status === 'success') return { key: 'done', text: '已完成', tone: 'neutral' };
+    return { key: 'pending', text: '结果待核实', tone: 'medium' };
   }
 
-  function taskRows(traces) {
-    return traces.map((trace) => ({
-      href: traceUrl(trace.agent_id, trace.trace_id),
-      request: trace.original_request || '未提供原始请求',
-      trace_id: trace.trace_id,
-      time: trace.last_event_at,
-      state: taskState(trace),
-      incomplete: !trace.requester_id || trace.context_status === 'incomplete_context',
-    }));
+  function taskKey(trace) {
+    return JSON.stringify([trace.agent_id, trace.trace_id]);
   }
 
-  function agentTraces(agentId) {
-    try {
-      let traces = [];
-      if (db) {
-        traces = db.prepare('SELECT * FROM audit_traces WHERE agent_id = ?').all(agentId);
-      } else if (traceStore && typeof traceStore.listTraces === 'function') {
-        traces = traceStore.listTraces({ agentId });
-      }
-      return Array.isArray(traces) ? traces.slice().sort((a, b) =>
-        String(b.last_event_at ?? '').localeCompare(String(a.last_event_at ?? ''))
-        || String(a.trace_id).localeCompare(String(b.trace_id))) : [];
-    } catch {
-      return [];
+  function taskDetail(trace, backHref) {
+    const stored = db ? readTraceDetail(db, trace.agent_id, trace.trace_id)
+      : traceStore.getTrace(trace.agent_id, trace.trace_id);
+    if (!stored) return null;
+    // Keep Dashboard-only review metadata without changing the export API projection.
+    const record = { ...trace, ...stored, ...(stored.audit_result || {}) };
+    const events = orderedTraceEvents(stored.events
+      ?? traceStore?.listTraceEvents?.({ agentId: trace.agent_id, traceId: trace.trace_id }) ?? []);
+    let evidenceIds = record.evidence_event_ids ?? [];
+    if (typeof evidenceIds === 'string') {
+      try { evidenceIds = JSON.parse(evidenceIds); } catch { evidenceIds = []; }
     }
+    if (!Array.isArray(evidenceIds)) evidenceIds = [];
+    const reviewed = Number(record.review_version) > 0;
+    const notices = [];
+    if (!record.requester_id || record.context_status === 'incomplete_context') notices.push('上下文不完整，缺失字段以未记录展示。');
+    if (reviewed && !record.sealed_at) notices.push('收到新增日志，等待重新审计；当前展示已有审计结论。');
+    if (record.review_error) notices.push(reviewed ? '最近审查失败，保留已有结论。' : '审查未成功，尚无审计结论。');
+    if (record.review_input_sampled) notices.push(`审计基于采样证据，省略 ${record.omitted_event_count || 0} 条事件；证据记录仍展示完整日志。`);
+    return {
+      key: taskKey(record), agent_id: record.agent_id, trace_id: record.trace_id,
+      requester: record.requester_id || '发起人未知',
+      request: record.original_request || '未记录原始请求',
+      result: record.agent_result || '未记录执行结果',
+      purpose: record.expected_purpose || '', time: record.last_event_at,
+      state: taskState(record),
+      trace_status: record.trace_status,
+      trace_status_label: reviewed ? labelOf({ pending: '尚未判定', success: '成功', failed: '失败', interrupted: '任务中断', incomplete: '链路不完整' }, record.trace_status) : '尚未判定',
+      risk: reviewed ? labelOf({ none: '无风险', low: '低风险', medium: '中风险', high: '高风险' }, record.risk_level) : '尚未判定',
+      audit_status: reviewed ? '已审计' : record.sealed_reason === 'backfill' ? '未审查 · 历史记录' : '未审查',
+      review_version: Number(record.review_version) || 0,
+      first_reviewed_at: record.first_reviewed_at || null,
+      last_reviewed_at: record.last_reviewed_at || null,
+      reason: reviewed ? record.risk_reason || '未记录审计原因'
+        : record.sealed_reason === 'backfill' ? '历史导入记录，尚未审计，不能据此判断无风险。' : '日志已封存，尚无审计结论。',
+      notices, evidence_ids: evidenceIds,
+      events: events.map((event) => {
+        const id = event.event_id ?? event.id;
+        let raw = event.raw_json ?? {};
+        if (typeof raw === 'string') {
+          try { raw = JSON.parse(raw); } catch { /* Preserve original text when it is not JSON. */ }
+        }
+        return {
+          id, time: event.ts, event: event.event, tool: event.tool_name || '',
+          status: event.status || '', error: event.error_message || '',
+          result: event.result_summary || event.agent_result || '',
+          evidence: evidenceIds.some((value) => String(value) === String(id)),
+          raw_json: typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2),
+        };
+      }),
+      back_href: backHref,
+    };
   }
 
-  function taskPage(title, agentId, subtitle = '') {
-    return {
-      page: { title, subtitle, task_audit: true, updated_at: nowIso(),
-        breadcrumbs: [{ label: 'Agent', href: '/' }, { label: agentId, href: agentDashboardUrl(agentId) }] },
+  function dataDashboardPage(options = {}) {
+    const days = Number(options.range) === 30 ? 30 : 7;
+    const current = new Date();
+    const start = new Date(current.getTime() - (days - 1) * 86400000);
+    const startIso = start.toISOString();
+    const taskHref = (params = {}) => { const query = new URLSearchParams(params); return `/tasks${query.size ? `?${query}` : ''}`; };
+    let rows = [];
+    try {
+      rows = db ? db.prepare('SELECT * FROM audit_traces WHERE (sealed_at IS NOT NULL OR review_version > 0) AND last_event_at >= ?').all(startIso)
+        : typeof traceStore?.listTraces === 'function' ? traceStore.listTraces({}) : [];
+      if (!db) rows = rows.filter((row) => (row.sealed_at || Number(row.review_version) > 0) && String(row.last_event_at ?? '') >= startIso);
+    } catch { rows = []; }
+    const stateRows = rows.map((row) => ({ ...row, state: taskState(row) }));
+    const done = stateRows.filter((row) => row.state.key === 'done').length;
+    const attention = stateRows.filter((row) => row.state.key === 'attention');
+    const pending = stateRows.filter((row) => row.state.key === 'pending').length;
+    const daily = Array.from({ length: days }, (_, index) => {
+      const day = new Date(start.getTime() + index * 86400000);
+      const key = day.toISOString().slice(0, 10);
+      const values = stateRows.filter((row) => String(row.last_event_at ?? '').slice(0, 10) === key);
+      const label = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit' }).format(day);
+      return { label, short_label: label, total: values.length, attention: values.filter((row) => row.state.key === 'attention').length };
+    });
+    const grouped = (key, fallback, hrefFor) => {
+      const map = new Map();
+      stateRows.forEach((row) => { const label = row[key] || fallback; const item = map.get(label) ?? { label, total: 0, done: 0, attention: 0 }; item.total += 1; item.done += row.state.key === 'done' ? 1 : 0; item.attention += row.state.key === 'attention' ? 1 : 0; map.set(label, item); });
+      const max = Math.max(1, ...[...map.values()].map((item) => item.total));
+      return [...map.values()].sort((a, b) => b.total - a.total || a.label.localeCompare(b.label)).slice(0, 5).map((item) => ({ ...item, percent: Math.round(item.total / max * 100), completion_rate: item.total ? `${Math.round(item.done / item.total * 100)}%` : '—', href: hrefFor(item.label) }));
+    };
+    const maxTotal = Math.max(1, ...daily.map((row) => row.total));
+    const maxAttention = Math.max(1, ...daily.map((row) => row.attention));
+    return { page: { title: '数据看板', data_dashboard: true, updated_at: nowIso() }, dashboard: {
+      updated_at: new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'medium', timeStyle: 'short', hourCycle: 'h23' }).format(current), range_label: `最近 ${days} 天`, range_links: { seven: '/?range=7', thirty: '/?range=30' }, total: stateRows.length, done, completion_rate: stateRows.length ? `${(done / stateRows.length * 100).toFixed(1)}%` : '—', attention_count: attention.length, pending_count: pending,
+      trend: daily.map((row) => ({ ...row, total_percent: Math.max(3, Math.round(row.total / maxTotal * 100)), attention_percent: row.attention ? Math.max(3, Math.round(row.attention / maxAttention * 100)) : 0 })),
+      agents: grouped('agent_id', 'Agent 未知', (agent) => taskHref({ agent_id: agent, sort: 'priority', page: '1' })), requesters: grouped('requester_id', '发起人未知', (requester) => taskHref({ requester: requester === '发起人未知' ? 'unknown' : `id:${requester}`, sort: 'priority', page: '1' })),
+      attention_href: taskHref({ state: 'attention', sort: 'priority', page: '1' }), attention: attention.slice().sort((a, b) => String(b.last_event_at ?? '').localeCompare(String(a.last_event_at ?? ''))).slice(0, 5).map((row) => ({ request: row.original_request || '未记录原始请求', agent_id: row.agent_id, href: traceUrl(row.agent_id, row.trace_id) })), api: { ingest_url: `${baseUrl}/v1/ingest`, read_url: `${baseUrl}/v1/audit-logs`, docs_url: '/docs/agent-audit-log-integration-guide.md' },
+    } };
+  }
+
+  function taskWorkbenchPage(options = {}, selectedIdentity) {
+    const requesterFilter = options.requester !== undefined ? String(options.requester)
+      : options.requesterUnknown ? 'unknown'
+        : options.requester_id || options.requesterId ? `id:${options.requester_id ?? options.requesterId}` : '';
+    const filters = {
+      q: String(options.q ?? options.search ?? '').trim(),
+      agent_id: String(options.agent_id ?? options.agentId ?? ''),
+      requester: requesterFilter,
+      requester_id: requesterFilter.startsWith('id:') ? requesterFilter.slice(3) : '',
+      state: ['attention', 'pending', 'done', 'unreviewed'].includes(options.state) ? options.state : 'all',
+      sort: options.sort === 'recent' ? 'recent' : 'priority',
+    };
+    const page = {
+      page: { title: '任务工作台', subtitle: '查看发起人、原始请求、执行结果与审计证据。',
+        task_audit: true, task_workbench: true, updated_at: nowIso(),
+        breadcrumbs: [{ label: '任务工作台', href: '/tasks' }] },
       summary_metrics: [], filters: [], sections: [],
     };
-  }
-
-  function agentPage(agentId, { search = '', groups = 20, requesterId, page: requestedPage } = {}) {
-    if (requesterId !== undefined) return requesterTasksPage(agentId, requesterId, { page: requestedPage });
-    const traces = agentTraces(agentId);
-    const grouped = new Map();
-    for (const trace of traces) {
-      const key = trace.requester_id || '';
-      if (!grouped.has(key)) grouped.set(key, { requester_id: key,
-        name: trace.requester_name || key || '发起人未知', traces: [] });
-      grouped.get(key).traces.push(trace);
-    }
-    const query = String(search).trim().toLocaleLowerCase();
-    const matches = [...grouped.values()].filter((group) =>
-      `${group.requester_id} ${group.name}`.toLocaleLowerCase().includes(query));
-    const visibleCount = Math.max(20, Number.parseInt(groups, 10) || 20);
-    const page = taskPage(agentId, agentId, `${grouped.size} 位发起人 · ${traces.length} 个任务`);
-    page.sections.push({ id: 'requester_groups', type: 'requester_groups', title: '发起用户',
-      search, action: agentDashboardUrl(agentId),
-      groups: matches.slice(0, visibleCount).map((group, index) => ({
-        ...group, traces: undefined, count: group.traces.length, time: group.traces[0].last_event_at,
-        open: index === 0, href: requesterUrl(agentId, group.requester_id),
-        tasks: taskRows(group.traces.slice(0, 20)),
-        attention: group.traces.filter((trace) => taskState(trace).text === '需要介入').length,
-      })),
-      moreHref: matches.length > visibleCount
-        ? `${agentDashboardUrl(agentId)}?${new URLSearchParams({ q: search, groups: visibleCount + 20 })}` : null,
-    });
-    return page;
-  }
-
-  function requesterTasksPage(agentId, requesterId, { page: requestedPage = 1 } = {}) {
-    const traces = agentTraces(agentId).filter((trace) => (trace.requester_id || '') === requesterId);
-    const totalPages = Math.max(1, Math.ceil(traces.length / 20));
-    const currentPage = Math.min(totalPages, Math.max(1, Number.parseInt(requestedPage, 10) || 1));
-    const attention = traces.filter((trace) => taskState(trace).text === '需要介入').length;
-    const name = traces[0]?.requester_name || requesterId || '发起人未知';
-    const page = taskPage(`${name} 的任务`, agentId, `${traces.length} 个任务 · ${attention} 条需要介入`);
-    page.page.breadcrumbs.push({ label: name, href: requesterUrl(agentId, requesterId) });
-    page.sections.push({ id: 'requester_tasks', type: 'task_list', title: `${attention} 条需要介入`,
-      tasks: taskRows(traces.slice((currentPage - 1) * 20, currentPage * 20)) });
-    const url = requesterUrl(agentId, requesterId);
-    const pageUrl = (number) => `${url}${url.includes('?') ? '&' : '?'}page=${number}`;
-    page.sections.push({ id: 'task_pagination', type: 'pagination', currentPage, totalPages,
-      previousHref: currentPage > 1 ? pageUrl(currentPage - 1) : null,
-      nextHref: currentPage < totalPages ? pageUrl(currentPage + 1) : null });
-    return page;
-  }
-
-  function traceDetailPage(agentId, traceId) {
-    const stored = db ? readTraceDetail(db, agentId, traceId) : traceStore.getTrace(agentId, traceId);
-    if (!stored) return null;
-    const trace = stored.audit_result === undefined ? stored : {
-      ...stored, trace_status: 'pending', risk_level: 'unreviewed', review_version: 0, ...stored.audit_result,
+    const queryUrl = (path, overrides = {}) => {
+      const values = { ...filters, page: currentPage, ...overrides };
+      const params = new URLSearchParams();
+      for (const [key, value] of Object.entries(values)) {
+        if (key === 'requester_id') continue;
+        if (value !== undefined && value !== null && value !== '' && !(key === 'state' && value === 'all')) params.set(key, String(value));
+      }
+      return `${path}${params.size ? `?${params}` : ''}`;
     };
-    const events = orderedTraceEvents(trace.events ?? traceStore.listTraceEvents({ agentId, traceId }));
-    const reviewed = Number(trace.review_version) > 0;
-    const state = taskState(trace);
-    const page = taskPage('任务详情', agentId, traceId);
-    page.page.breadcrumbs.push({ label: trace.requester_id || '发起人未知', href: requesterUrl(agentId, trace.requester_id) }, { label: '任务详情' });
-    const fields = (id, title, items) => ({ id, title, type: 'definition_list', items: items.map(([label, value]) => ({ label, value: value ?? '未提供' })) });
-    page.sections = [
-      fields('task_conclusion', '任务结论', [
-        ['任务状态', state.text],
-        ['链路状态', labelOf({ pending: '尚未判定', success: '成功', failed: '失败', interrupted: '任务中断', incomplete: '链路不完整' }, trace.trace_status)],
-        ['风险等级', reviewed ? labelOf({ none: '无风险', low: '低风险', medium: '中风险', high: '高风险' }, trace.risk_level) : '未审查'],
-        ['人工介入', reviewed && trace.risk_level === 'high' ? '需要人工介入' : reviewed ? '无需人工介入' : '尚未判定'],
-      ]),
-      fields('task_context', '任务上下文', [
-        ['发起用户', trace.requester_id || '发起人未知'], ['用户原始请求', trace.original_request],
-        ['Agent 预期目的', trace.expected_purpose], ['Agent 执行结果', trace.agent_result],
-        ['上下文', !trace.requester_id || trace.context_status === 'incomplete_context' ? '上下文不完整' : trace.context_status === 'complete' ? '完整' : '未知'],
-      ]),
-      fields('task_audit_result', 'Agent 审计结果', [
-        ['审计结论', reviewed ? state.text : '未审查'], ['风险原因', trace.risk_reason],
-        ['审查批次', trace.review_id || `审查版本 ${trace.review_version || 0}`],
-        ['首次审计时间', trace.first_reviewed_at], ['最近审计时间', trace.last_reviewed_at],
-        ['证据事件 ID', Array.isArray(trace.evidence_event_ids) ? trace.evidence_event_ids.join('、') : trace.evidence_event_ids],
-        ...(trace.review_error ? [['审查提示', '最近审查失败，保留已有结论']] : []),
-        ...(trace.review_input_sampled ? [['采样说明', `该 Trace 事件过多，审查结论基于采样证据（省略 ${trace.omitted_event_count || 0} 条）；下方仍展示完整事件`]] : []),
-      ]),
-      events.length ? { id: 'task_evidence', title: `证据链（${events.length} 条事件）`, type: 'trace_sequence',
-        steps: events.map((event, index) => ({ ...traceSequenceSteps([event])[0], order: index + 1 })) }
-        : { id: 'task_evidence', title: '证据链', type: 'callout', body: '暂无事件' },
-      { id: 'task_raw_logs', title: `原始日志（${events.length} 条事件）`, type: 'raw_log_list', collapsible: true,
-        snippets: events.map((event) => ({
-          label: `事件 ID ${event.event_id ?? event.id} · ${event.ts} · ${event.event} · ${event.tool_name || '-'} · ${event.status || '-'}`,
-          body: typeof event.raw_json === 'string' ? event.raw_json : JSON.stringify(event.raw_json ?? {}, null, 2),
-        })) },
-    ];
+    let currentPage = Math.max(1, Number.parseInt(options.page, 10) || 1);
+    const workbench = {
+      action: '/tasks', filters, agents: [], options: { agents: [], requesters: [] }, stats: [], tasks: [],
+      pagination: { currentPage: 1, totalPages: 1, total: 0, previousHref: null, nextHref: null },
+      selected: null, clear_href: '/tasks', back_href: '/tasks', standalone: Boolean(selectedIdentity), error: null,
+    };
+    page.workbench = workbench;
+    try {
+      const receivedAgents = listAgents();
+      let rows;
+      if (db) {
+        rows = db.prepare('SELECT * FROM audit_traces WHERE sealed_at IS NOT NULL OR review_version > 0').all();
+      } else if (typeof traceStore?.listTraces === 'function') {
+        rows = receivedAgents.length ? receivedAgents.flatMap((agent) => traceStore.listTraces({ agentId: agent.agent_id }))
+          : traceStore.listTraces({});
+      } else {
+        rows = [];
+      }
+      rows = rows.filter((trace) => trace.sealed_at || Number(trace.review_version) > 0);
+      const agents = [...new Set([...receivedAgents.map((agent) => agent.agent_id), ...rows.map((trace) => trace.agent_id)])].sort();
+      const agentNames = new Map(receivedAgents.map((agent) => [agent.agent_id, agent.agent_name || agent.agent_id]));
+      workbench.options.agents = agents.map((id) => ({ value: id, label: agentNames.get(id) || id }));
+      const agentHref = (agentId) => queryUrl('/tasks', { agent_id: agentId, requester: '', page: 1 });
+      workbench.agents = [
+        { value: '', label: '全部 Agent', count: rows.length, href: agentHref(''), selected: !filters.agent_id },
+        ...agents.map((id) => ({
+          value: id,
+          label: agentNames.get(id) || id,
+          count: rows.filter((trace) => trace.agent_id === id).length,
+          href: agentHref(id),
+          selected: filters.agent_id === id,
+        })),
+      ];
+      const requesterRows = rows.filter((trace) => !filters.agent_id || trace.agent_id === filters.agent_id);
+      workbench.options.requesters = [...new Set(requesterRows.map((trace) => trace.requester_id || ''))].sort()
+        .map((id) => ({ value: id ? `id:${id}` : 'unknown', label: id || '发起人未知' }));
+      const query = filters.q.toLocaleLowerCase();
+      const scope = rows.filter((trace) =>
+        (!filters.agent_id || trace.agent_id === filters.agent_id)
+        && (!filters.requester || (filters.requester === 'unknown'
+          ? !trace.requester_id : trace.requester_id === filters.requester_id))
+        && (!query || [trace.original_request, trace.requester_id || '发起人未知', trace.requester_name, trace.trace_id, trace.agent_id]
+          .some((value) => String(value ?? '').toLocaleLowerCase().includes(query))));
+      workbench.stats = [
+        ['all', '全部任务'], ['attention', '需要关注'], ['pending', '结果待核实'], ['done', '已完成'],
+      ].map(([key, label]) => ({
+        key, label, count: scope.filter((trace) => key === 'all' || taskState(trace).key === key).length,
+        href: queryUrl('/tasks', { state: key, page: 1 }),
+      }));
+      const rank = { attention: 0, pending: 1, done: 2, unreviewed: 3 };
+      const matches = scope.filter((trace) => filters.state === 'all' || taskState(trace).key === filters.state)
+        .sort((a, b) => (filters.sort === 'priority' ? rank[taskState(a).key] - rank[taskState(b).key] : 0)
+          || String(b.last_event_at ?? '').localeCompare(String(a.last_event_at ?? ''))
+          || String(a.agent_id).localeCompare(String(b.agent_id))
+          || String(a.trace_id).localeCompare(String(b.trace_id)));
+      const totalPages = Math.max(1, Math.ceil(matches.length / 20));
+      let selected;
+      if (selectedIdentity) {
+        const index = matches.findIndex((trace) => trace.agent_id === selectedIdentity.agentId && trace.trace_id === selectedIdentity.traceId);
+        selected = rows.find((trace) => trace.agent_id === selectedIdentity.agentId && trace.trace_id === selectedIdentity.traceId);
+        if (!selected) return null;
+        currentPage = index >= 0 ? Math.floor(index / 20) + 1 : Math.min(currentPage, totalPages);
+      } else {
+        currentPage = Math.min(currentPage, totalPages);
+        selected = matches[(currentPage - 1) * 20];
+      }
+      const backHref = queryUrl('/tasks');
+      workbench.back_href = backHref;
+      workbench.tasks = matches.slice((currentPage - 1) * 20, currentPage * 20).map((trace) => ({
+        key: taskKey(trace), agent_id: trace.agent_id, trace_id: trace.trace_id,
+        requester: trace.requester_id || '发起人未知', request: trace.original_request || '未记录原始请求',
+        time: trace.last_event_at, state: taskState(trace),
+        href: queryUrl(traceUrl(trace.agent_id, trace.trace_id)), selected: trace === selected,
+      }));
+      workbench.pagination = { currentPage, totalPages, total: matches.length,
+        previousHref: currentPage > 1 ? queryUrl('/tasks', { page: currentPage - 1 }) : null,
+        nextHref: currentPage < totalPages ? queryUrl('/tasks', { page: currentPage + 1 }) : null };
+      if (selected) {
+        workbench.selected = taskDetail(selected, backHref);
+        if (selectedIdentity && !matches.includes(selected) && workbench.selected) {
+          workbench.selected.notices.push('该任务不在当前筛选结果中；返回列表可继续查看原筛选结果。');
+        }
+      }
+    } catch {
+      workbench.error = '任务记录读取失败，请稍后重试。';
+      workbench.tasks = [];
+      workbench.stats = [];
+      workbench.selected = null;
+    }
     return page;
+  }
+
+  function agentIndexPage(options = {}) {
+    return taskWorkbenchPage(options);
+  }
+
+  function agentPage(agentId, options = {}) {
+    return taskWorkbenchPage({ ...options, agent_id: agentId,
+      ...(options.requesterId === '' ? { requester: 'unknown' } : {}) });
+  }
+
+  function requesterTasksPage(agentId, requesterId, options = {}) {
+    return taskWorkbenchPage({ ...options, agent_id: agentId, requester: requesterId ? `id:${requesterId}` : 'unknown' });
+  }
+
+  function traceDetailPage(agentId, traceId, options = {}) {
+    return taskWorkbenchPage(options, { agentId, traceId });
   }
 
   function overviewPage({
@@ -2079,6 +2098,7 @@ export function createVisualization({ reviewStore, traceStore, db, config, llmCl
   return {
     dashboardUrlFor,
     findingUrlFor,
+    dataDashboardPage,
     agentIndexPage,
     agentPage,
     requesterTasksPage,

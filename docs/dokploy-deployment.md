@@ -70,7 +70,7 @@ GET /health -> 200
 
 严禁绕过 Dokploy Proxy 直接暴露服务端口、Docker host port 或容器 IP 到公网。这样会绕过 TLS、Dashboard Cookie 的代理 HTTPS 标识及网关访问控制。
 
-部署默认选择：公网只发布 HTTPS 的 Dashboard 与 `/v1/audit-*` 读取路径；`/query` 是无鉴权的本地开发排障接口，公网 router 不发布它，也不公开 `/report/*`。`/v1/ingest` 没有内建认证，默认仅内网可达，不发布公网写入 router。跨网络 Agent 写入必须使用 HTTPS；需要公网接入时，先在 Traefik 为独立 ingest 路由配置并验证鉴权中间件，再开放，不能用 Dashboard Token 代替 ingest 认证。
+部署默认选择：公网只发布 HTTPS 的 Dashboard 与 `/v1/audit-logs` 读取路径。`/v1/ingest` 没有内建认证，默认仅内网可达，不发布公网写入 router。跨网络 Agent 写入必须使用 HTTPS；需要公网接入时，先在 Traefik 为独立 ingest 路由配置并验证鉴权中间件，再开放，不能用 Dashboard Token 代替 ingest 认证。
 
 通过 Dokploy Domains 选择现有服务 `audit-logger-agent`、容器端口 `9320`，启用 HTTPS 和有效证书，复用现有 Traefik，不在应用容器运行第二套 TLS。建议采用 Traefik 已配置的 ACME resolver 签发续期；正式域名和 resolver 名称由部署环境确认，不假定仓库自带证书。Dokploy 会生成路由配置，但默认整域名路由不等于路径隔离：上线前核对实际生成规则，避免宽泛 Host router 绕过上述路径限制。
 
@@ -133,7 +133,7 @@ Dashboard 顶部的“飞书通知正常”状态标识同时作为即时日报�
 
 1. 停止应用。
 2. 使用备份恢复 `audit-logger-data` Volume 到 `/app/data`，保留目录结构和文件权限。
-3. 启动应用，检查 `/health` 的 `db.writable`，再通过 Dashboard 或 `/query` 抽查数据。
+3. 启动应用，检查 `/health` 的 `db.writable`，再通过 Dashboard 抽查数据。
 
 恢复或迁移时不要同时运行两个挂载同一 SQLite Volume 的应用实例。
 
@@ -151,7 +151,7 @@ Dashboard 顶部的“飞书通知正常”状态标识同时作为即时日报�
 | `auditReview.traceReview.maxInvalidOutputRetries` | 2 | 持久化失败计数达到该值后停止重试 |
 | `auditReview.http.requireHttpsBaseUrl` | 容器 true / 本地 false | 校验显式 HTTPS 基地址 |
 
-迁移按顺序执行：备份 → compat 接收新字段 → guarded schema 升级和历史 backfill → Trace 聚合审查并保留 Finding → 切换 Trace 通知/日报 → 切换 Dashboard/API → 按 Agent 开启 `agents[agentId].ingestMode=strict`。旧数据不猜测 requester/result 字段，历史 Trace 保持未审查；旧 Finding URL 和 `/query` 保持兼容。`GET /v1/audit-logs` 使用 Bearer Token，按 Trace 分页返回完整事件和 raw_json，客户端原样回传服务端游标。
+迁移按顺序执行：备份 → compat 接收新字段 → guarded schema 升级和历史 backfill → Trace 聚合审查并保留 Finding → 切换 Trace 通知/日报 → 切换 Dashboard/API → 按 Agent 开启 `agents[agentId].ingestMode=strict`。旧数据不猜测 requester/result 字段，历史 Trace 保持未审查。`GET /v1/audit-logs` 使用 Bearer Token，按 Trace 分页返回完整事件和 raw_json，客户端原样回传服务端游标。
 
 验收检查 HTTPS 证书和续期、读取鉴权、HTTP 不能写入、旧链接可用、回填不发告警、每日 10:00/17:00 日报与手动日报持续工作。更新上游 `AUDIT_INGEST_URL`、coding agent API 基地址和 Dashboard 基地址，确认飞书链接直达包含 Agent 与 Trace 的任务页。
 
