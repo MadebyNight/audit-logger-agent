@@ -376,8 +376,8 @@ test('trace LLM respects shared budget without counting a deferred call as failu
 
 test('task fields prefer run start and final terminal, recording conflicts', async () => {
   const db = makeDb();
-  insertEvent(db, 1, 'tool.end', { requester_id: 'wrong', original_request: 'wrong', agent_result: 'partial' });
-  insertEvent(db, 2, 'run.start', { requester_id: 'right', original_request: 'right' });
+  insertEvent(db, 1, 'tool.end', { requester_id: 'wrong', original_request: 'wrong', expected_purpose: 'wrong', agent_result: 'partial' });
+  insertEvent(db, 2, 'run.start', { requester_id: 'right', original_request: 'right', expected_purpose: 'right purpose' });
   insertEvent(db, 3, 'run.final_result', { agent_result: 'first' });
   insertEvent(db, 4, 'run.final_result', { agent_result: 'last', ts: '2026-09-14T11:02:00.000Z' });
   const deps = makeDeps(db);
@@ -385,6 +385,8 @@ test('task fields prefer run start and final terminal, recording conflicts', asy
   const trace = deps.traceStore.getTrace('agent-a', 'trace-a');
   assert.equal(trace.requester_id, 'right');
   assert.equal(trace.original_request, 'right');
+  assert.equal(trace.expected_purpose, 'right purpose');
+  assert.equal(trace.context_status, 'complete');
   assert.equal(trace.agent_result, 'last');
   assert.match(trace.risk_reason, /冲突事件ID：1,3/);
   db.close();

@@ -141,7 +141,7 @@ export function createCandidateDetector({ db, riskPolicy } = {}) {
       if (row.event === 'tool.end' || row.event === 'tool.error') {
         if (row.span_id) endedSpanIds.add(row.span_id);
       }
-      if (row.trace_id && isToolEvent(row)) {
+      if (row.trace_id && isToolEvent(row) && (row.span_id || row.event === 'tool.start')) {
         const bucket = traceToolEvents.get(row.trace_id) ?? [];
         bucket.push(row);
         traceToolEvents.set(row.trace_id, bucket);
@@ -166,6 +166,7 @@ export function createCandidateDetector({ db, riskPolicy } = {}) {
     const repeatedCandidates = new Map();
     for (const row of rows) {
       if (!isToolRiskEvent(row)) continue;
+      if (!row.span_id && row.event !== 'tool.start') continue;
       const tsMs = toEpochMs(row.ts);
       if (tsMs == null) continue;
       const key = `${row.agent_id}|${row.tool_name}|${row.entity_type ?? ''}|${row.entity_id ?? ''}`;

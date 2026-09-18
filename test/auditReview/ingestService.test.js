@@ -301,7 +301,7 @@ test('readIncrementalChunk: returns empty chunk when offset >= size', () => {
 });
 
 
-test('spool uses per-agent strict validation and persists compat redaction metrics', () => {
+test('spool enforces the same task and redaction rules as HTTP', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-task-spool-'));
   const db = openDb(':memory:');
   try {
@@ -316,17 +316,14 @@ test('spool uses per-agent strict validation and persists compat redaction metri
       makeLine({ event: 'run.final_result', agent_result: 'done', trace_id: 'valid' }),
     ].join('\n') + '\n');
     const config = makeConfig(logDir, path.join(tmpDir, 'audit.db'));
-    config.agents = { 'test-agent': { ingestMode: 'strict' } };
     const service = createAuditIngestService({ db, config, cursorStore: createIngestCursorStore(db) });
     const result = service.ingestSince({ sinceDate: '2026-07-03' });
     assert.equal(result.inserted, 1);
-    assert.equal(result.parseErrors.length, 4);
-    config.agents['test-agent'].ingestMode = 'compat';
-    fs.appendFileSync(file, makeLine({ requester_id: 'user@example.test', trace_id: 'compat' }) + '\n');
-    assert.equal(service.ingestSince({ sinceDate: '2026-07-03' }).inserted, 1);
-    const row = db.prepare("SELECT * FROM audit_events WHERE trace_id = 'compat'").get();
-    assert.equal(row.redaction_hits, 1);
-    assert.match(row.ingested_at, /^\d{4}-.*Z$/);
+    assert.equal(result.parseErrors.length, 5);
+    fs.appendFileSync(file, makeLine({ requester_id: 'user@example.test', trace_id: 'redacted-rejected' }) + '\n');
+    const followup = service.ingestSince({ sinceDate: '2026-07-03' });
+    assert.equal(followup.inserted, 0);
+    assert.match(followup.parseErrors[0].error, /unredacted personal data/);
   } finally {
     db.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });

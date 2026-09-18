@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
   ts TEXT NOT NULL,
   agent_id TEXT NOT NULL,
   trace_id TEXT NOT NULL,
-  span_id TEXT NOT NULL,
+  span_id TEXT,
   parent_span_id TEXT,
   event TEXT NOT NULL,
   tool_name TEXT NOT NULL,
@@ -108,9 +108,14 @@ export function openDb(dbPath) {
   db.pragma('synchronous = NORMAL');
   db.pragma('cache_size = -8000');
   db.pragma('foreign_keys = ON');
-  db.exec(SCHEMA);
-  migrateAuditEvents(db);
-  return db;
+  try {
+    db.exec(SCHEMA);
+    migrateAuditEvents(db);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
 }
 
 function columnExists(db, table, column) {
@@ -148,6 +153,29 @@ function migrateAuditEvents(db) {
   addColumnIfMissing(db, 'audit_events', 'mapped_at', 'TEXT');
   db.exec('CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_events(entity_type, entity_id);');
   db.exec('CREATE INDEX IF NOT EXISTS idx_audit_tool_mapping ON audit_events(mapped_tool_type, mapping_status);');
+  migrateOptionalSpan(db);
+}
+
+function migrateOptionalSpan(db) {
+  if (!db.prepare('PRAGMA table_info(audit_events)').all().find(column => column.name === 'span_id')?.notnull) return;
+  const schema = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'audit_events'").get().sql;
+  const indexes = db.prepare("SELECT sql FROM sqlite_master WHERE tbl_name = 'audit_events' AND type IN ('index', 'trigger') AND sql IS NOT NULL").all();
+  const sequence = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'audit_events'").get()?.seq ?? 0;
+  // Rebuild atomically, preserving event IDs (audit evidence/cursors), raw rows and indexes.
+  db.pragma('foreign_keys = OFF');
+  try {
+    db.transaction(() => {
+      db.exec(`CREATE TABLE audit_events_span_migration ${schema.slice(schema.indexOf('(')).replace(/\bspan_id\s+TEXT\s+NOT\s+NULL/i, 'span_id TEXT')}`);
+      db.exec('INSERT INTO audit_events_span_migration SELECT * FROM audit_events');
+      db.exec('DROP TABLE audit_events');
+      db.exec('ALTER TABLE audit_events_span_migration RENAME TO audit_events');
+      for (const { sql } of indexes) db.exec(sql);
+      db.prepare("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'audit_events'").run(sequence);
+      if (db.pragma('foreign_key_check').length) throw new Error('Optional Span migration failed foreign key validation');
+    }).immediate();
+  } finally {
+    db.pragma('foreign_keys = ON');
+  }
 }
 
 export function insertEvents(db, events) {

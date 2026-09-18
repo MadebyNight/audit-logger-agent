@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { normalizeEntry, validateLogEntry, resolveIngestMode } from '../../../scripts/lib/parser.js';
+import { normalizeEntry, validateLogEntry } from '../../../scripts/lib/parser.js';
 import { insertEvents } from '../../../scripts/lib/db.js';
 import { getRuntimePaths } from '../../app/paths.js';
 
@@ -103,7 +103,7 @@ function parseNdjsonBody(raw, lineLimitBytes) {
   return { events, errors };
 }
 
-function validateEvent(event, index, lineLimitBytes, ingestMode) {
+function validateEvent(event, index, lineLimitBytes) {
   const errors = [];
   if (!event || typeof event !== 'object' || Array.isArray(event)) {
     return {
@@ -121,7 +121,7 @@ function validateEvent(event, index, lineLimitBytes, ingestMode) {
     errors.push({ index, error: 'agent_id is invalid' });
   }
 
-  const validationErrors = validateLogEntry(event, index + 1, { mode: ingestMode });
+  const validationErrors = validateLogEntry(event, index + 1);
   for (const error of validationErrors) {
     errors.push(typeof error === 'string' ? { index, error } : {
       index, error: error.message, error_code: error.code, field: error.field, trace_id: event.trace_id,
@@ -178,8 +178,7 @@ export async function handleIngestRoute(req, res, { config = {}, db, toolSemanti
   const accepted = [];
   const rejectedIndexes = new Set(errors.map((error) => error.index));
   for (const item of events) {
-    const ingestMode = resolveIngestMode(config, item.event?.agent_id);
-    const { errors: eventErrors, normalizedEvent } = validateEvent(item.event, item.index, lineLimitBytes, ingestMode);
+    const { errors: eventErrors, normalizedEvent } = validateEvent(item.event, item.index, lineLimitBytes);
     if (eventErrors.length > 0) {
       errors.push(...eventErrors);
       rejectedIndexes.add(item.index);

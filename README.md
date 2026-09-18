@@ -31,7 +31,7 @@
 }
 ```
 
-Dashboard 页面可直接访问，不需要登录。在右下角点击「API Token」打开侧边栏，填写调用方名称即可申请独立只读 Token。完整 Token 仅创建时展示，请复制保存；调用 `/v1/audit-logs` 时使用 `Authorization: Bearer <Token>`。侧边栏支持停用和查看最近访问记录。
+Dashboard 页面可直接访问，不需要登录。在右上角点击「API Token」打开侧边栏，填写调用方名称即可申请独立只读 Token。完整 Token 仅创建时展示，请复制保存；调用 `/v1/audit-logs` 时使用 `Authorization: Bearer <Token>`。侧边栏支持停用、恢复、删除和查看最近访问记录；删除后 Token 永久失效，历史调用记录保留。
 
 每个 Token 绑定独立服务账号，可读取全部 Agent 日志。访问记录单独保存，不进入 Trace、审查、飞书通知或日报。已有 `AUDIT_AGENT_DASHBOARD_TOKEN` 会迁移为「历史接入账号」，仍可使用并记录访问；停用后重启不会重新启用。
 
@@ -58,7 +58,7 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:9320/health'
 
 默认不公开无认证 ingest；跨网络写入先配置 Traefik 鉴权或受控内网 HTTPS 路由。容器 `requireHttpsBaseUrl=true`，未设置有效 HTTPS 基地址会拒绝启动。详见[部署说明](docs/dokploy-deployment.md)。
 
-V1.1 以 `(agent_id, trace_id)` 聚合完整任务，Dashboard 按 Agent → 发起用户 → 任务显示；列表状态为“审查中、未审查、需要介入、待确认、已完成”。新接入必填 `requester_id`、`original_request`、`agent_result`（按开始/终止事件条件），`expected_purpose` 可选。历史回填不调用 LLM，保持未审查，不触发告警。
+V1.1 以 `(agent_id, trace_id)` 聚合完整任务，Dashboard 按 Agent → 发起用户 → 任务显示；列表状态为“审查中、未审查、需要介入、待确认、已完成”。日志接入统一严格校验：`run.start` 必填 `requester_id`、`original_request`、`expected_purpose`，`run.final_result`/`run.failed` 必填 `agent_result`；`span_id` 与 `parent_span_id` 可选。没有兼容模式开关，缺失 Span 不补造调用关系。历史回填不调用 LLM，保持未审查，不触发告警。
 
 保留默认值为 `retention.traceDays=30`、`highRiskTraceDays=90`、`maxTracesPerAgent=2000`，按整条 Trace 清理全部证据；不再按 48 小时/200 条事件截断。未封存、未审查且仍可重试的任务保护；历史 backfill 和失败重试耗尽记录可以过期清理。`auditReview.traceReview` 默认静默 60 分钟、等待用户 1440 分钟、LLM 输入最多 2000 条、失败计数上限 2。等待用户超时不自动判高风险；API 始终返回完整事件，采样仅用于 LLM。
 

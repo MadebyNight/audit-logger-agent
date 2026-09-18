@@ -41,7 +41,7 @@ function traceConfig(config) {
 }
 
 function contextStatusFor(trace) {
-  const required = [trace.requester_id, trace.original_request, trace.agent_result];
+  const required = [trace.requester_id, trace.original_request, trace.expected_purpose, trace.agent_result];
   const missing = required.filter((value) => value == null || value === '').length;
   if (missing === 0) return 'complete';
   return missing === required.length ? 'unknown' : 'incomplete_context';
@@ -63,14 +63,15 @@ function hasMinorEvidence(events) {
 }
 
 function hasLongLoopEvidence(events, policy = {}) {
-  const tools = events.filter((event) => String(event.event).startsWith('tool.'));
+  // Without a Span, start/end events cannot be paired reliably. Count starts only.
+  const tools = events.filter((event) => String(event.event).startsWith('tool.') && (event.span_id || event.event === 'tool.start'));
   const invocations = new Set(tools.map((event) => event.span_id ? JSON.stringify([event.tool_name, event.span_id]) : `event:${event.event_id}`));
   if (invocations.size > (policy.traceToolChainStepThreshold ?? 50)) return true;
   const buckets = new Map();
   for (const event of tools) {
     const key = JSON.stringify([event.tool_name, event.entity_type, event.entity_id]);
     const cutoff = Date.parse(event.ts) - (policy.repeatWindowMinutes ?? 10) * 60000;
-    const bucket = (buckets.get(key) ?? []).filter((prior) => Date.parse(prior.ts) >= cutoff && prior.span_id !== event.span_id);
+    const bucket = (buckets.get(key) ?? []).filter((prior) => Date.parse(prior.ts) >= cutoff && (!event.span_id || prior.span_id !== event.span_id));
     bucket.push(event);
     buckets.set(key, bucket);
     if (bucket.length >= (policy.repeatThreshold ?? 5)) return true;
@@ -132,8 +133,8 @@ function evidenceIds(events) {
 function deterministicOutcome(events, policy = {}) {
   const final = events.find((event) => event.event === 'run.final_result');
   const failed = events.find((event) => event.event === 'run.failed');
-  const ended = new Set(events.filter((event) => ['agent.end', 'agent.error'].includes(event.event)).map((event) => event.span_id));
-  const unfinishedChildren = events.filter((event) => event.event === 'agent.start' && !ended.has(event.span_id));
+  const ended = new Set(events.filter((event) => event.span_id && ['agent.end', 'agent.error'].includes(event.event)).map((event) => event.span_id));
+  const unfinishedChildren = events.filter((event) => event.span_id && event.event === 'agent.start' && !ended.has(event.span_id));
   const failureEvidence = hasFailureEvidence(events);
   const longLoop = hasLongLoopEvidence(events, policy);
   if (failed || events.some((event) => String(event.status ?? '').toUpperCase() === 'CANCELLED' && TERMINAL_EVENTS.has(event.event))) {
@@ -274,11 +275,6 @@ export function createTraceAggregator({ db, config, traceStore, llmReviewer, loc
     return getCursorStmt.get(cursorName) ?? { cursor_name: cursorName, last_ingested_at: null, last_event_id: 0 };
   }
 
-  function firstNonEmpty(events, field) {
-    const event = events.find((candidate) => candidate[field] != null && candidate[field] !== '');
-    return event ? event[field] : null;
-  }
-
   function aggregateFacts(agentId, traceId, events) {
     const first = events[0];
     const last = events.at(-1);
@@ -287,7 +283,7 @@ export function createTraceAggregator({ db, config, traceStore, llmReviewer, loc
       trace_id: traceId,
       requester_id: events.find((event) => event.event === 'run.start')?.requester_id ?? null,
       original_request: events.find((event) => event.event === 'run.start')?.original_request ?? null,
-      expected_purpose: firstNonEmpty(events, 'expected_purpose'),
+      expected_purpose: events.find((event) => event.event === 'run.start')?.expected_purpose ?? null,
       agent_result: events.filter((event) => TERMINAL_EVENTS.has(event.event)).at(-1)?.agent_result ?? null,
       first_event_at: first?.ts,
       last_event_at: last?.ts,

@@ -34,47 +34,12 @@ test('blank dashboard base URL environment variable preserves file configuration
   );
 });
 
-test('ingest mode resolution prefers per-agent config over environment and defaults to compat', () => {
-  const config = loadAppConfig(process.cwd(), {
-    env: { AUDIT_INGEST_STRICT_MODE: 'strict' },
-  });
-
-  assert.equal(config.ingest.defaultMode, 'strict');
-  assert.deepEqual(config.agents, {});
-
-  const compatConfig = loadAppConfig(process.cwd(), {
-    env: { AUDIT_INGEST_STRICT_MODE: '  compat  ' },
-  });
-  assert.equal(compatConfig.ingest.defaultMode, 'compat');
-  assert.deepEqual(compatConfig.agents, {});
-});
-
-test('ingest mode defaults to compat when no mode is configured', () => {
-  const config = loadAppConfig(process.cwd(), { env: {} });
-
-  assert.equal(config.ingest.defaultMode, 'compat');
-});
-
-
-test('per-agent ingestMode is preserved independently of environment default', () => {
-  const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-config-'));
-  const configPath = path.join(rootDir, 'config.json');
-  fs.writeFileSync(configPath, JSON.stringify({
-    agents: { 'agent-a': { ingestMode: 'strict' } },
-    ingest: {},
-  }));
-  try {
-    const config = loadAppConfig(rootDir, {
-      env: { AUDIT_INGEST_STRICT_MODE: 'compat' },
-    });
-
-    assert.equal(config.ingest.defaultMode, 'compat');
-    assert.equal(config.agents['agent-a'].ingestMode, 'strict');
-  } finally {
-    fs.rmSync(rootDir, { recursive: true, force: true });
+test('config no longer creates an ingest mode from legacy environment switches', () => {
+  for (const value of ['strict', 'compat', '']) {
+    const config = loadAppConfig(process.cwd(), { env: { AUDIT_INGEST_STRICT_MODE: value } });
+    assert.equal(config.ingest.defaultMode, undefined);
   }
 });
-
 
 test('HTTPS startup guard is explicit and requires a valid environment URL', () => {
   const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-https-config-'));

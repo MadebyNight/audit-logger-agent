@@ -2,44 +2,30 @@
 import crypto from 'crypto';
 import { insertEvents } from '../../scripts/lib/db.js';
 import { normalizeCanonicalStatus } from '../../scripts/lib/auditSpec.js';
+import { normalizeEntry } from '../../scripts/lib/parser.js';
 
 export function createRuntimeAuditLogger(db, { agentId = 'audit-runtime-agent', channel = 'system' } = {}) {
   return {
-    async log({ runId, traceId = null, event, status, summary, toolName = 'agent.runtime' }) {
-      const ts = new Date().toISOString();
-      const resolvedTraceId = traceId ?? `trace_${runId}`;
-      const spanId = crypto.randomUUID();
-      const canonicalStatus = normalizeCanonicalStatus(status);
-
-      insertEvents(db, [{
-        ts,
+    async log({ runId, traceId = null, event, status, summary, toolName = 'agent.runtime',
+      requesterId, originalRequest, expectedPurpose }) {
+      const entry = {
+        ts: new Date().toISOString(),
         agent_id: agentId,
-        trace_id: resolvedTraceId,
-        span_id: spanId,
-        parent_span_id: null,
+        trace_id: traceId ?? `trace_${runId}`,
+        span_id: crypto.randomUUID(),
         event,
         tool_name: toolName,
-        status: canonicalStatus,
-        result_summary: summary,
-        duration_ms: null,
+        status: normalizeCanonicalStatus(status),
+        result_summary: String(summary ?? '').slice(0, 200),
         channel,
-        user_id: null,
-        entity_type: null,
-        entity_id: null,
-        llm_intent_json: null,
-        error_message: null,
-        tags: JSON.stringify(['agent-runtime']),
-        raw_json: JSON.stringify({
-          ts,
-          agent_id: agentId,
-          trace_id: resolvedTraceId,
-          span_id: spanId,
-          event,
-          tool_name: toolName,
-          status: canonicalStatus,
-          result_summary: summary,
-        }),
-      }]);
+        tags: ['agent-runtime'],
+        ...(event === 'run.start' ? {
+          requester_id: requesterId, original_request: originalRequest, expected_purpose: expectedPurpose,
+        } : {}),
+        ...(['run.final_result', 'run.failed'].includes(event) ? { agent_result: summary } : {}),
+      };
+      // Internal scheduler diagnostics also use event names outside the public lifecycle vocabulary.
+      insertEvents(db, [{ ...normalizeEntry(entry), event }]);
     },
   };
 }

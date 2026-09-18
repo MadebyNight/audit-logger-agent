@@ -76,7 +76,9 @@ class Runtime {
   // immediately (async ACK). Execution continues in the background via executor.
   startRun(input) {
     const created = this.#runStore.createRun(input);
-    this.#auditLogger.log({ runId: created.run_id, event: 'run.start', status: 'OK', summary: 'Run created' })
+    this.#auditLogger.log({ runId: created.run_id, event: 'run.start', status: 'OK', summary: 'Run created',
+      requesterId: created.user_open_id, originalRequest: created.request_text,
+      expectedPurpose: '解析审计请求，执行审计工具并汇总结果' })
       .catch(() => {});
     this.#executor(() => this.#planAndExecute(created.run_id).catch((error) => {
       // Defensive: #planAndExecute converges its own failures, but guard

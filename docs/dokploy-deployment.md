@@ -32,7 +32,7 @@
 | `AUDIT_AGENT_FEISHU_WEBHOOK_FILE` | 否 | Webhook secret 文件路径；配置后优先于 URL 环境变量 |
 | `AUDIT_AGENT_FEISHU_LIVE_CONFIRM` | live 时是 | 必须为 `CONFIRM_FEISHU_LIVE`，用于防止误开启真实发送 |
 
-调用 `/v1/audit-logs` 前，在 Dashboard 右下角「API Token」侧边栏申请只读 Token。无需配置环境变量，完整 Token 仅创建时展示。旧环境变量 Token 兼容迁移为独立账号，可以在侧边栏停用。
+调用 `/v1/audit-logs` 前，在 Dashboard 右上角「API Token」侧边栏申请只读 Token。无需配置环境变量，完整 Token 仅创建时展示。旧环境变量 Token 兼容迁移为独立账号，可在侧边栏停用、恢复或删除；删除后不能恢复，历史调用记录保留。
 
 飞书通知默认关闭。建议先使用 `dry-run` 验证卡片构建，再按“本地测试 → 卡片预览审核 → Docker 测试 → 真实客户端验收 → live”的顺序推进。Webhook 不应写入配置文件、Git、日志或命令历史；生产启用前应在飞书侧配置 IP 白名单或关键词安全策略。当前发送器未生成飞书签名字段，如需启用签名校验，应先扩展并验证签名支持。
 
@@ -151,8 +151,8 @@ Dashboard 顶部的“飞书通知正常”状态标识同时作为即时日报�
 | `auditReview.traceReview.maxInvalidOutputRetries` | 2 | 持久化失败计数达到该值后停止重试 |
 | `auditReview.http.requireHttpsBaseUrl` | 容器 true / 本地 false | 校验显式 HTTPS 基地址 |
 
-迁移按顺序执行：备份 → compat 接收新字段 → guarded schema 升级和历史 backfill → Trace 聚合审查并保留 Finding → 切换 Trace 通知/日报 → 切换 Dashboard/API → 按 Agent 开启 `agents[agentId].ingestMode=strict`。旧数据不猜测 requester/result 字段，历史 Trace 保持未审查。`GET /v1/audit-logs` 使用 Bearer Token，按 Trace 分页返回完整事件和 raw_json，客户端原样回传服务端游标。
+升级前备份 SQLite 数据库与数据卷，并先让日志生产方补齐 `run.start` 的 `requester_id`、`original_request`、`expected_purpose` 及终止事件的 `agent_result`。接入统一严格校验，不再支持 compat/strict 切换。启动时自动将 `audit_events.span_id` 改为可空：事务内重建表，保留事件 ID、原始日志、索引及引用关系；旧数据不补造字段。升级期间停止旧服务写入，避免旧进程与新 schema 混用。`GET /v1/audit-logs` 使用 Dashboard 申请的 Bearer Token，按 Trace 分页返回完整事件和 raw_json，客户端原样回传服务端游标。
 
 验收检查 HTTPS 证书和续期、读取鉴权、HTTP 不能写入、旧链接可用、回填不发告警、每日 10:00/17:00 日报与手动日报持续工作。更新上游 `AUDIT_INGEST_URL`、coding agent API 基地址和 Dashboard 基地址，确认飞书链接直达包含 Agent 与 Trace 的任务页。
 
-回滚时保留事件、新列、Trace、审查版本、通知去重记录和 Outbox，不恢复旧事件级清理规则。接入可回退 compat（同时取消各 Agent 显式 strict），不放宽类型/长度校验；展示可恢复旧 Finding 入口。HTTPS 路由回退前先协调客户端地址，不同时开放 HTTP/HTTPS 双写；公网仍保持 HTTPS 或停止开放入口。日报已落库统计、时段和 Outbox 不回滚、不重算。
+回滚时保留事件、新列、Trace、审查版本、通知去重记录和 Outbox，不恢复旧事件级清理规则。不能通过环境变量回退为宽松接入。需要回滚 schema 时先停止服务，恢复升级前备份并使用对应代码版本；升级后新增记录须另行保全，避免被备份覆盖。HTTPS 路由回退前先协调客户端地址，不同时开放 HTTP/HTTPS 双写；公网仍保持 HTTPS 或停止开放入口。日报已落库统计、时段和 Outbox 不回滚、不重算。

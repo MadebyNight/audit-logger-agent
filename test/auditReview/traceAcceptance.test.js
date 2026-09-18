@@ -19,7 +19,7 @@ function setup(reviewTrace) {
     db.prepare(`INSERT INTO audit_events
       (row_hash,agent_id,trace_id,span_id,ts,ingested_at,event,tool_name,status,requester_id,original_request,agent_result)
       VALUES (@hash,'a','t',@span,@ts,@ingested,@event,@tool,@status,'u','request',@result)`)
-      .run({ hash: String(id), span: overrides.span ?? String(id),
+      .run({ hash: String(id), span: Object.hasOwn(overrides, 'span') ? overrides.span : String(id),
         ts: `2026-09-16T10:${String(Math.floor(id / 60)).padStart(2,'0')}:${String(id % 60).padStart(2,'0')}.000Z`,
         ingested: `2026-09-16T11:${String(Math.floor(id / 60)).padStart(2,'0')}:${String(id % 60).padStart(2,'0')}.000Z`,
         event: name, tool: overrides.tool ?? 'run', status: overrides.status ?? 'OK',
@@ -39,6 +39,46 @@ test('acceptance: 26 successful distinct tool calls with paired lifecycle logs a
     f.event('run.final_result');
     await f.aggregator.run();
     assert.equal(f.store.getTrace('a','t').risk_level, 'none');
+  } finally { f.db.close(); }
+});
+
+test('acceptance: spanless starts and ends are not double counted or falsely paired', async () => {
+  const f = setup(() => { throw new Error('LLM not expected'); });
+  try {
+    f.event('run.start', { span: null });
+    f.event('agent.start', { span: null });
+    for (let i = 0; i < 26; i++) {
+      f.event('tool.start', { span: null, tool: `tool-${i}` });
+      f.event('tool.end', { span: null, tool: `tool-${i}` });
+    }
+    f.event('run.final_result', { span: null });
+    await f.aggregator.run();
+    assert.equal(f.store.getTrace('a','t').trace_status, 'success');
+    assert.equal(f.store.getTrace('a','t').risk_level, 'none');
+  } finally { f.db.close(); }
+});
+
+test('acceptance: repeated spanless starts remain detectable without pairing terminal events', async () => {
+  const f = setup(() => { throw new Error('LLM not expected'); });
+  try {
+    f.event('run.start', { span: null });
+    for (let i = 0; i < 5; i++) {
+      f.event('tool.start', { span: null, tool: 'repeat.tool' });
+      f.event('tool.end', { span: null, tool: 'repeat.tool' });
+    }
+    f.event('run.final_result', { span: null });
+    await f.aggregator.run();
+    assert.equal(f.store.getTrace('a','t').risk_level, 'medium');
+  } finally { f.db.close(); }
+});
+
+test('acceptance: a spanless end cannot close an identified child Span', async () => {
+  const f = setup(() => { throw new Error('LLM not expected'); });
+  try {
+    f.event('run.start'); f.event('agent.start', { span: 'child' });
+    f.event('agent.end', { span: null }); f.event('run.final_result');
+    await f.aggregator.run();
+    assert.equal(f.store.getTrace('a','t').trace_status, 'interrupted');
   } finally { f.db.close(); }
 });
 

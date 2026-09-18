@@ -308,9 +308,11 @@ function backfillAuditTraces(db) {
       CASE
         WHEN MAX(CASE WHEN COALESCE(TRIM(requester_id), '') <> '' THEN 1 ELSE 0 END) = 1
          AND MAX(CASE WHEN COALESCE(TRIM(original_request), '') <> '' THEN 1 ELSE 0 END) = 1
+         AND MAX(CASE WHEN COALESCE(TRIM(expected_purpose), '') <> '' THEN 1 ELSE 0 END) = 1
          AND MAX(CASE WHEN COALESCE(TRIM(agent_result), '') <> '' THEN 1 ELSE 0 END) = 1 THEN 'complete'
         WHEN MAX(CASE WHEN COALESCE(TRIM(requester_id), '') <> '' THEN 1 ELSE 0 END) = 0
          AND MAX(CASE WHEN COALESCE(TRIM(original_request), '') <> '' THEN 1 ELSE 0 END) = 0
+         AND MAX(CASE WHEN COALESCE(TRIM(expected_purpose), '') <> '' THEN 1 ELSE 0 END) = 0
          AND MAX(CASE WHEN COALESCE(TRIM(agent_result), '') <> '' THEN 1 ELSE 0 END) = 0 THEN 'unknown'
         ELSE 'incomplete_context'
       END,

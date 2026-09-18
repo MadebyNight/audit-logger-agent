@@ -2,7 +2,6 @@ export const REQUIRED_FIELDS = [
   'ts',
   'agent_id',
   'trace_id',
-  'span_id',
   'event',
   'tool_name',
   'status',
@@ -17,7 +16,7 @@ export const TASK_FIELDS = Object.freeze({
 });
 
 export const EVENT_REQUIRED_TASK_FIELDS = Object.freeze({
-  'run.start': ['requester_id', 'original_request'],
+  'run.start': ['requester_id', 'original_request', 'expected_purpose'],
   'run.final_result': ['agent_result'],
   'run.failed': ['agent_result'],
 });

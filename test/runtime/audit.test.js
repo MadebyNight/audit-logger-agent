@@ -20,6 +20,7 @@ test('runtime audit logger writes run lifecycle events into audit_events', async
     event: 'run.start',
     status: 'OK',
     summary: 'Run created',
+    requesterId: 'runtime-user', originalRequest: '查询审计日志', expectedPurpose: '汇总任务审计结果',
   });
 
   const rows = queryEvents(db, { agent_id: 'audit-runtime-agent' });
@@ -43,6 +44,7 @@ test('runtime audit events round-trip through ndjson parser', async () => {
     event: 'run.start',
     status: 'OK',
     summary: 'Run created',
+    requesterId: 'runtime-user', originalRequest: '查询审计日志', expectedPurpose: '汇总任务审计结果',
   });
 
   await auditLogger.log({
@@ -60,6 +62,10 @@ test('runtime audit events round-trip through ndjson parser', async () => {
 
   assert.deepEqual(errors, []);
   assert.equal(entries.length, 2);
+  const start = entries.find(entry => entry.event === 'run.start');
+  assert.equal(start.expected_purpose, '汇总任务审计结果');
+  assert.equal(start.requester_id, 'runtime-user');
+  assert.equal(entries.find(entry => entry.event === 'run.failed').agent_result, 'Run failed');
   assert.deepEqual(
     entries.map((entry) => entry.event).sort(),
     ['run.failed', 'run.start'],

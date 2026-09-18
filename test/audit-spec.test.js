@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import Database from 'better-sqlite3';
 
 import { normalizeEventId } from '../scripts/lib/auditSpec.js';
 import { openDb, insertEvents, queryEvents } from '../scripts/lib/db.js';
@@ -47,7 +48,7 @@ test('normalizeEventId maps known aliases to canonical event ids only', () => {
 
 test('parser accepts canonical audit event fields and normalizes entity and llm_intent', () => {
   const { entries, errors } = parseOne(validEntry({
-    parent_span_id: '',
+    parent_span_id: null,
     user_id: '',
     llm_intent: { input: 'summarize request', output: 'return concise answer' },
     error: { message: 'not used for OK' },
@@ -299,48 +300,105 @@ test('openDb migrates legacy audit_events before creating entity index', () => {
   }
 });
 
-test('task fields enforce event-specific required rules by ingest mode', () => {
-  const runStart = validEntry({ event: 'run.start' });
 
-  const compat = parseOne(runStart, { mode: 'compat' });
-  assert.deepEqual(compat.errors, []);
-  assert.equal(compat.entries.length, 1);
-
-  const strict = parseOne(runStart, { mode: 'strict' });
-  assert.equal(strict.entries.length, 0);
-  assertErrorCode(strict.errors, 'missing_required_task_field', 'requester_id');
-  assertErrorCode(strict.errors, 'missing_required_task_field', 'original_request');
-
-  const completeRunStart = { ...runStart, requester_id: 'user-1', original_request: 'summarize report' };
-  assert.deepEqual(parseOne({ ...completeRunStart, expected_purpose: '' }, { mode: 'strict' }).errors, []);
-  assert.deepEqual(parseOne({ ...completeRunStart, expected_purpose: undefined }, { mode: 'strict' }).errors, []);
-
-  for (const event of ['run.final_result', 'run.failed']) {
-    const errors = validationErrors(validEntry({ event, agent_result: undefined }), { mode: 'strict' });
-    assertErrorCode(errors, 'missing_required_task_field', 'agent_result');
+test('optional Span migration preserves legacy rows, evidence references, indexes and sequence across reopen', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-span-migration-'));
+  const file = path.join(directory, 'audit.db');
+  let db = openDb(file);
+  try {
+    const schema = db.prepare("SELECT sql FROM sqlite_master WHERE name='audit_events'").get().sql;
+    db.exec('DROP TABLE audit_events');
+    db.exec(schema.replace('span_id TEXT,', 'span_id TEXT NOT NULL,'));
+    insertEvents(db, [normalizeEntry(validEntry())]);
+    db.exec('CREATE INDEX custom_trace_index ON audit_events(trace_id, ts)');
+    db.exec('CREATE TABLE evidence_ref(event_id INTEGER REFERENCES audit_events(id))');
+    db.exec('INSERT INTO evidence_ref VALUES (1)');
+    db.prepare("UPDATE sqlite_sequence SET seq=80 WHERE name='audit_events'").run();
+    const original = db.prepare('SELECT * FROM audit_events').get();
+    db.close();
+    db = openDb(file);
+    assert.deepEqual(db.prepare('SELECT * FROM audit_events').get(), original);
+    assert.equal(db.prepare('PRAGMA table_info(audit_events)').all().find(c => c.name === 'span_id').notnull, 0);
+    assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE name='custom_trace_index'").get());
+    assert.deepEqual(db.pragma('foreign_key_check'), []);
+    const row = normalizeEntry(validEntry({ trace_id: 'no-span', span_id: undefined }));
+    assert.equal(insertEvents(db, [row]), 1);
+    assert.equal(db.prepare("SELECT id FROM audit_events WHERE trace_id='no-span'").get().id, 81);
+    db.close();
+    db = openDb(file);
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM audit_events').get().n, 2);
+    assert.equal(insertEvents(db, [row]), 0);
+  } finally {
+    if (db.open) db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test('task fields enforce type and length rules in both ingest modes', () => {
-  const base = validEntry({ event: 'run.start', requester_id: 'user-1', original_request: 'summarize report' });
-  const typeErrors = validationErrors({ ...base, requester_id: {} });
-  assertErrorCode(typeErrors, 'invalid_field_type', 'requester_id');
+test('failed optional Span migration rolls back and closes its connection', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'audit-span-rollback-'));
+  const file = path.join(directory, 'audit.db');
+  let db = openDb(file);
+  try {
+    const schema = db.prepare("SELECT sql FROM sqlite_master WHERE name='audit_events'").get().sql;
+    db.exec('DROP TABLE audit_events');
+    db.exec(schema.replace('span_id TEXT,', 'span_id TEXT NOT NULL,'));
+    insertEvents(db, [normalizeEntry(validEntry())]);
+    const original = db.prepare('SELECT * FROM audit_events').get();
+    db.pragma('foreign_keys = OFF');
+    db.exec('CREATE TABLE evidence_ref(event_id INTEGER REFERENCES audit_events(id))');
+    db.exec('INSERT INTO evidence_ref VALUES (999)');
+    db.close();
+    assert.throws(() => openDb(file), /foreign key validation/);
+    db = new Database(file);
+    assert.deepEqual(db.prepare('SELECT * FROM audit_events').get(), original);
+    assert.equal(db.prepare('PRAGMA table_info(audit_events)').all().find(c => c.name === 'span_id').notnull, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name='audit_events_span_migration'").get().n, 0);
+    db.exec('UPDATE evidence_ref SET event_id=1');
+    db.close();
+    db = openDb(file);
+    assert.deepEqual(db.pragma('foreign_key_check'), []);
+  } finally {
+    if (db.open) db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
-  const lengths = {
-    requester_id: 128,
-    original_request: 2000,
-    expected_purpose: 1000,
-    agent_result: 2000,
-  };
-  for (const mode of ['compat', 'strict']) {
-    const options = { mode };
-    for (const [field, maxLength] of Object.entries(lengths)) {
-      assert.deepEqual(validationErrors({ ...base, [field]: 'x'.repeat(maxLength) }, options), []);
-      assertErrorCode(
-        validationErrors({ ...base, [field]: 'x'.repeat(maxLength + 1) }, options),
-        'field_too_long',
-        field,
-      );
+test('task fields have one strict contract, including purpose on run.start', () => {
+  const start = validEntry({ event: 'run.start', requester_id: 'user-1', original_request: 'request', expected_purpose: 'purpose' });
+  assert.deepEqual(parseOne(start).errors, []);
+  for (const field of ['requester_id', 'original_request', 'expected_purpose']) {
+    for (const value of [undefined, null, '', '  ']) {
+      assertErrorCode(validationErrors({ ...start, [field]: value }), 'missing_required_task_field', field);
     }
   }
+  // Obsolete caller options cannot weaken the contract.
+  assertErrorCode(parseOne({ ...start, expected_purpose: undefined }, { mode: 'compat' }).errors, 'missing_required_task_field', 'expected_purpose');
+  for (const event of ['run.final_result', 'run.failed']) {
+    assertErrorCode(validationErrors(validEntry({ event })), 'missing_required_task_field', 'agent_result');
+    assert.deepEqual(validationErrors(validEntry({ event, agent_result: 'done' })), []);
+  }
+});
+
+test('task fields enforce type and length limits', () => {
+  const base = validEntry({ event: 'run.start', requester_id: 'user-1', original_request: 'request', expected_purpose: 'purpose' });
+  for (const [field, maxLength] of Object.entries({ requester_id: 128, original_request: 2000, expected_purpose: 1000, agent_result: 2000 })) {
+    assert.deepEqual(validationErrors({ ...base, [field]: 'x'.repeat(maxLength) }), []);
+    assertErrorCode(validationErrors({ ...base, [field]: 'x'.repeat(maxLength + 1) }), 'field_too_long', field);
+    assertErrorCode(validationErrors({ ...base, [field]: {} }), 'invalid_field_type', field);
+  }
+});
+
+test('Span fields are optional, validated when provided, and not synthesized', () => {
+  for (const field of ['span_id', 'parent_span_id']) {
+    for (const value of [undefined, null, 'span-valid']) assert.deepEqual(validationErrors(validEntry({ [field]: value })), []);
+    for (const value of ['', '  ', 123, {}, []]) assert.ok(validationErrors(validEntry({ [field]: value })).some(error => String(error).includes(field)));
+  }
+  const event = validEntry({ span_id: undefined, parent_span_id: undefined });
+  const row = normalizeEntry(event);
+  assert.equal(row.span_id, null);
+  assert.equal(row.parent_span_id, null);
+  assert.equal(Object.hasOwn(JSON.parse(row.raw_json), 'span_id'), false);
+  const db = openDb(':memory:');
+  try { assert.equal(insertEvents(db, [row]), 1); assert.equal(queryEvents(db, {})[0].span_id, null); }
+  finally { db.close(); }
 });

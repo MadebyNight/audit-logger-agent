@@ -20,16 +20,6 @@ export function loadAppConfig(rootDir, { env = process.env } = {}) {
     throw new Error(`Invalid JSON in config file ${configPath}: ${error.message}`);
   }
 
-  const strictMode = typeof env.AUDIT_INGEST_STRICT_MODE === 'string'
-    ? env.AUDIT_INGEST_STRICT_MODE.trim().toLowerCase()
-    : '';
-  if (strictMode || !config.ingest?.defaultMode) {
-    config.ingest = {
-      ...(config.ingest ?? {}),
-      defaultMode: strictMode === 'strict' ? 'strict' : 'compat',
-    };
-  }
-
   const dashboardBaseUrl = typeof env.AUDIT_AGENT_DASHBOARD_BASE_URL === 'string'
     ? env.AUDIT_AGENT_DASHBOARD_BASE_URL.trim()
     : '';

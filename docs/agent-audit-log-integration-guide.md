@@ -16,14 +16,14 @@
 2. 同时告诉编码 Agent 目标 Agent 的仓库位置；如果目标仓库已经是其当前工作目录，可以省略。
 3. 编码 Agent 应自行检查项目结构、配置方式、启动命令、测试体系和工具调用入口，然后直接开始改造。
 4. 改造完成后，编码 Agent 必须运行一次真实且无破坏性的 Agent 任务，将验证用 `trace_id`、查询结果和 Dashboard 地址交付给用户。
-5. 用户或编码 Agent 必须在 Dashboard 中看到目标 `agent_id`、接收日志数和最新日志时间。看不到就不算完成。
+5. 用户或编码 Agent 必须在 Dashboard 中看到目标 `agent_id`、任务记录和最近活动时间。看不到就不算完成。
 
 默认审计服务地址：
 
 ```text
 服务基地址：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me
 日志接收地址：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/v1/ingest
-Agent 日志入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/
+Agent 任务入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/tasks
 审计 Dashboard：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/dashboard
 ```
 
@@ -44,7 +44,7 @@ Agent 日志入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-
 - 用户要求使用非默认审计服务，但没有提供地址；
 - 目标 Agent 必须依赖用户凭证、人工确认或外部环境才能运行真实验收任务。
 
-不得以单元测试通过、日志文件已生成、HTTP 返回 `202`、`/query` 能查到数据或 Dashboard 出现 Agent 中的任意一项单独作为完成依据。最终必须同时完成 Trace 合规验收和 Dashboard 验收。
+不得以单元测试通过、日志文件已生成、HTTP 返回 `202`、`/v1/audit-logs` 能查到数据或 Dashboard 出现 Agent 中的任意一项单独作为完成依据。最终必须同时完成 Trace 合规验收和 Dashboard 验收。
 
 ## 3. 完成定义
 
@@ -55,18 +55,18 @@ Agent 日志入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-
 3. 一次真实请求、消息处理或自治任务使用同一个 `trace_id`；委派给子 Agent 时继续传播该 `trace_id`。
 4. 每个任务必须记录 `run.start` 和 `run.final_result`/`run.failed`，不能因为项目原来没有 Run 抽象而省略。
 5. Agent 生命周期必须记录 `agent.start` 和 `agent.end`/`agent.error`。
-6. 实际工具调用必须记录成对的 `tool.start` 和 `tool.end`/`tool.error`，开始和结束复用同一个 `span_id`。
-7. Run、Agent 和工具使用各自稳定的 Span；除根 Run 外，所有 Span 必须填写可解析的 `parent_span_id`。
+6. 实际工具调用记录 `tool.start` 和 `tool.end`/`tool.error`；若提供 `span_id`，开始和结束复用同一个值。
+7. `span_id` 和 `parent_span_id` 均可选，不提供时按 Trace 审计，不生成虚构 Span。提供时使用非空字符串，调用关联应能还原真实关系。
 8. `agent.start` 和 `tool.start` 必须记录脱敏后的操作意图；高风险工具还必须记录用户确认或策略授权的关联信息。
 9. 等待用户时记录 `run.waiting_user`，恢复时记录 `run.resume`；两个事件必须通过同一决策标识关联。
-10. 业务重试必须创建新的 `span_id` 并关联原调用；HTTP 投递重试必须重发完全相同的原始 payload，不能混淆两类重试。
+10. 业务重试若使用 Span，应创建新的 `span_id` 并关联原调用；HTTP 投递重试必须重发完全相同的原始 payload，不能混淆两类重试。
 11. 事件先追加到目标 Agent 自己的本地 NDJSON 文件，再异步发送相同 payload 到 `/v1/ingest`。
 12. 发送端解析 `accepted`、`rejected` 和 `errors`；没有被服务端确认的事件进入本地重试队列。
 13. 审计发送失败不会改变目标 Agent 原有业务结果，也不会长时间阻塞用户请求。
 14. 自动化测试覆盖事件构造、链路完整性、意图字段、用户确认、业务重试、成功发送、拒收处理、网络失败和重试回放。
-15. 使用真实目标 Agent 完成一次无破坏性的调用，并通过 `/query?trace_id=...` 查到完整事件链和意图摘要。
+15. 使用真实目标 Agent 完成一次无破坏性的调用，并通过 `/v1/audit-logs?agent_id=...&trace_id=...` 查到完整事件链和意图摘要。
 16. 至少使用一个失败、等待确认或重试场景验证非成功链路；不能只验收单工具成功路径。
-17. Dashboard 的 Agent 日志入口已经显示目标 `agent_id`、接收日志数和最新日志时间。
+17. 任务工作台已显示目标 `agent_id`、任务记录和最近活动时间。
 18. 编码 Agent 能直接查看 Dashboard 时，由编码 Agent 完成可见性检查；无法查看时，必须把具体网址和验证信息交给用户，并等待用户确认后才能宣称完成。
 
 ## 4. 自动改造流程
@@ -143,9 +143,9 @@ Agent 日志入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-
 
 ### 阶段三：接入 Agent 生命周期
 
-一次用户请求、消息处理或自治任务只生成一个 `trace_id`。在整个调用链中显式传递它，不要让每个工具自行生成新的 Trace。委派给子 Agent 时继续传播同一 `trace_id`，并让子 Agent 的 `agent.start` 指向触发委派的父 Span。
+一次用户请求、消息处理或自治任务只生成一个 `trace_id`。在整个调用链中显式传递它，不要让每个工具自行生成新的 Trace。委派给子 Agent 时继续传播同一 `trace_id`，若使用 Span，可让子 Agent 的 `agent.start` 指向触发委派的父 Span。
 
-最低合规链路：
+典型完整链路（图中的 Span 为可选关联信息，不是接收必填项）：
 
 ```text
 run.start                 trace_id=req-100, span_id=run-1, tool_name=agent.run
@@ -158,12 +158,12 @@ run.final_result          span_id=run-1, 含目标是否达成和未完成项
 
 Run 事件使用稳定的运行组件名，例如 `agent.run`；Agent 事件使用稳定的生命周期组件名，例如 `agent.lifecycle`。这些名称用于满足当前服务端统一字段契约，不代表一次真实工具调用。工具语义映射验收只检查 `tool.*` 事件，不要求 Run 和 Agent 生命周期事件映射为工具类型。
 
-同一层级的规则：
+提供 Span 时，同一层级的关联规则：
 
 - `run.start` 与 `run.final_result`/`run.failed` 复用 Run Span；
 - `agent.start` 与 `agent.end`/`agent.error` 复用 Agent Span；
 - `tool.start` 与 `tool.end`/`tool.error` 复用工具 Span；
-- 根 Run 不填写 `parent_span_id`；Agent、工具和子 Agent 必须填写父 Span；
+- 根 Run 不填写 `parent_span_id`；Agent、工具和子 Agent 可填写真实的父 Span；
 - 开始事件的 `result_summary` 描述“准备做什么”，终止事件描述“实际发生了什么”；
 - 一个 Span 只能有一个终止事件，不能同时出现 `.end` 和 `.error`。
 
@@ -174,7 +174,7 @@ Run 事件使用稳定的运行组件名，例如 `agent.run`；Agent 事件使�
 - Agent 成功：`agent.start` → `agent.end`；
 - Agent 失败：`agent.start` → `agent.error`。
 
-结束事件填写非负的 `duration_ms`。同一个调用的开始和结束必须复用同一个 `span_id`。
+结束事件填写非负的 `duration_ms`。若提供 Span，同一个调用的开始和结束复用同一个 `span_id`。
 
 等待用户确认时：
 
@@ -223,7 +223,7 @@ catalog.update.verify
 
 业务重试与投递重试必须区分：
 
-- **业务重试**：工具再次执行，使用新的 `span_id`，增加 `attempt.number`，并通过 `attempt.retry_of_span_id` 指向上一尝试；
+- **业务重试**：工具再次执行；若使用 Span，则使用新的 `span_id`，增加 `attempt.number`，并通过 `attempt.retry_of_span_id` 指向上一尝试；
 - **投递重试**：工具没有再次执行，只是重新发送同一审计事件，必须复用完全相同的原始 payload。
 
 不要为了日志而虚构目标 Agent 实际不存在的业务阶段，但不得因为现有代码缺少统一封装而省略真实发生的确认、重试、委派或验证节点。
@@ -233,15 +233,15 @@ catalog.update.verify
 遵循目标项目现有测试体系，至少验证：
 
 1. 最小事件包含全部必填字段并通过本地校验。
-2. Run、Agent 和工具的开始与终止事件分别复用正确的 `trace_id`、`span_id`。
-3. 非根 Span 的 `parent_span_id` 指向同一 Trace 内真实存在的父 Span。
+2. Run、Agent 和工具的事件使用同一 `trace_id`；若提供 Span，开始与终止事件复用对应 `span_id`。
+3. 若提供 `parent_span_id`，检查其是否指向真实父调用；未提供时不执行父子关联验收。
 4. `agent.start` 和 `tool.start` 包含符合第 5.3 节语义的意图摘要。
 5. 一个 Span 只能存在一个终止事件，且终止事件时间不早于开始事件。
 6. 成功响应必须满足 `accepted === 1` 且 `rejected === 0`；不能只检查 HTTP 状态。
 7. `202` 但 `rejected > 0` 时，事件进入失败队列或隔离区。
 8. 网络错误、超时和非 2xx 不影响原业务调用结果。
 9. 投递重试使用原始 payload，不重新生成时间和链路 ID。
-10. 业务重试使用新 Span，并通过 `attempt.retry_of_span_id` 关联原调用。
+10. 业务重试与投递重试分开；若使用 Span，业务重试使用新 Span，并关联原调用。
 11. 用户批准、拒绝、确认内容变化和恢复执行分别有测试；批准对象变化时不得继续执行。
 12. 子 Agent 继续使用父任务的 `trace_id`，且子 Agent Span 能关联到委派 Span。
 13. 回放成功后队列记录被移除；重复发送不会在服务端形成重复数据库事件。
@@ -276,9 +276,10 @@ Invoke-RestMethod -Uri "$auditBaseUrl/health"
 
 ```powershell
 $traceId = '<真实调用生成的 trace_id>'
-$queryUrl = "$auditBaseUrl/query?trace_id=$([uri]::EscapeDataString($traceId))&limit=100"
-$result = Invoke-RestMethod -Uri $queryUrl
-$result.results | Format-Table ts, agent_id, event, tool_name, status, trace_id, span_id, parent_span_id, duration_ms, llm_intent_json
+# 在 Dashboard 右上角 API Token 侧边栏申请，将 Token 放入当前客户端的 AUDIT_READ_TOKEN 环境变量。
+$queryUrl = "$auditBaseUrl/v1/audit-logs?agent_id=$([uri]::EscapeDataString($agentId))&trace_id=$([uri]::EscapeDataString($traceId))"
+$result = Invoke-RestMethod -Uri $queryUrl -Headers @{ Authorization = "Bearer $env:AUDIT_READ_TOKEN" }
+$result.traces | ForEach-Object { $_.events } | Format-Table ts, agent_id, event, tool_name, status, trace_id, span_id, parent_span_id, duration_ms
 ```
 
 查询结果必须满足：
@@ -288,8 +289,8 @@ $result.results | Format-Table ts, agent_id, event, tool_name, status, trace_id,
 - 存在 `run.start` 和 `run.final_result`/`run.failed`；
 - 存在 `agent.start` 和 `agent.end`/`agent.error`；
 - 同一工具存在 `tool.start` 和 `tool.end`/`tool.error`；
-- 配对事件使用相同的 `trace_id` 和 `span_id`；
-- 非根 Span 的 `parent_span_id` 指向同一 Trace 中存在的父 Span；
+- 事件使用相同的 `trace_id`；若提供 Span，则配对事件使用相同的 `span_id`；
+- 若提供 `parent_span_id`，它指向真实的父调用；
 - `agent.start` 和 `tool.start` 能看到脱敏后的目标、决策摘要或预期影响；
 - 同一 Span 没有同时出现 `.end` 和 `.error`；
 - 等待/恢复、批准/执行和业务重试场景具有可解析的关联标识；
@@ -302,15 +303,15 @@ $result.results | Format-Table ts, agent_id, event, tool_name, status, trace_id,
 最后打开 Dashboard：
 
 ```text
-Agent 日志入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/
-目标 Agent 审计视图：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/dashboard?agent_id=<URL 编码后的 agent_id>
+Agent 任务入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/tasks
+目标 Agent 审计视图：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/tasks?agent_id=<URL 编码后的 agent_id>
 ```
 
 在 Agent 日志入口确认：
 
 - 页面出现目标 `agent_id`；
-- “接收日志数”已经增加；
-- “最新日志时间”与刚才的真实调用一致。
+- 任务工作台出现该任务，发起人、请求和预期目的与输入一致；
+- “最近活动”与刚才的真实调用一致；任务已收到终止事件或超时封存，等待调度审计后检查结果。
 
 编码 Agent 有浏览器能力时必须自行打开并检查页面。没有浏览器能力时，在交付说明中给出以上两个可点击地址、实际 `agent_id`、验证 `trace_id` 和查询结果摘要，并明确要求用户打开确认。用户尚未确认时，状态应写成“代码改造与接口验证完成，等待 Dashboard 人工确认”，不能写“改造全部完成”。
 
@@ -318,7 +319,7 @@ Agent 日志入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-
 
 1. `AUDIT_INGEST_URL` 是否为完整的 `/v1/ingest` 地址；
 2. ingest 响应是否真的满足 `accepted > 0` 且 `rejected === 0`；
-3. `/query?trace_id=...` 是否能查到事件；
+3. `/v1/audit-logs?agent_id=...&trace_id=...` 是否能查到事件；
 4. 查询结果中的 `agent_id` 是否与预期完全一致；
 5. Dashboard 是否打开了同一个审计服务环境；
 6. 修复后重新运行真实调用，直到 Dashboard 可见。
@@ -332,12 +333,10 @@ Agent 日志入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-
   "ts": "2026-07-17T08:30:00.000Z",
   "agent_id": "catalog-agent",
   "trace_id": "request-8ecb",
-  "span_id": "tool-27aa",
   "event": "tool.start",
   "tool_name": "catalog.product.get",
   "status": "OK",
   "result_summary": "准备读取商品摘要",
-  "parent_span_id": "agent-5fd2",
   "llm_intent": {
     "input": "任务目标：确认商品 761 的当前状态",
     "output": "下一步动作：读取商品状态与库存摘要，不执行写入"
@@ -345,20 +344,19 @@ Agent 日志入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-
 }
 ```
 
-以下八个字段是服务端必填字段，缺少或为空会拒收该事件：
+以下七个字段是服务端必填字段，缺少或为空会拒收该事件：
 
 | 字段 | 规范 | 改造要求 |
 | --- | --- | --- |
 | `ts` | 可解析的 ISO 8601 时间 | 首次构造后固定；重试不得改写 |
 | `agent_id` | 稳定字符串；只使用字母、数字、`.`, `_`, `-` | 不能是 `.`、`..`，不能包含 `..`、斜杠或路径片段 |
 | `trace_id` | 非空字符串 | 同一次请求或任务全链路保持一致 |
-| `span_id` | 非空字符串 | 同一调用的开始和结束复用；不同调用应唯一 |
 | `event` | 字符串 | 使用第 5.4 节的 canonical 事件名 |
 | `tool_name` | 稳定工具或运行组件名 | 使用能表达语义的点号命名，不包含动态数据 |
 | `status` | canonical 状态码 | 必须使用第 5.5 节列出的全大写值 |
 | `result_summary` | 不超过 200 字符的短文本 | 开始事件写准备执行的动作，终止事件写实际结果 |
 
-这八个字段是 HTTP ingest 的统一基础字段，因此 Run 和 Agent 生命周期事件也必须填写。生命周期事件使用稳定的运行组件名作为 `tool_name`，例如 `agent.run`、`agent.lifecycle`；不要留空或临时生成。
+这七个字段是 HTTP ingest 的统一基础字段，因此 Run 和 Agent 生命周期事件也必须填写。生命周期事件使用稳定的运行组件名作为 `tool_name`，例如 `agent.run`、`agent.lifecycle`；不要留空或临时生成。
 
 ### 5.2 通用可选字段
 
@@ -382,7 +380,8 @@ Agent 日志入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-
 
 | 字段 | 规范 |
 | --- | --- |
-| `parent_span_id` | 字符串；用于关联父调用，没有父级时省略 |
+| `span_id` | 可选非空字符串；标识一次调用，开始和结束复用，没有时省略或填 null |
+| `parent_span_id` | 可选非空字符串；关联真实父调用，没有时省略或填 null |
 | `duration_ms` | 非负毫秒数；填写在 `.end` 或 `.error` 事件 |
 | `channel` | 来源渠道，例如 `http`、`cli`、`feishu` |
 | `user_id` | 稳定且已脱敏的用户标识；自治任务可省略 |
@@ -399,23 +398,14 @@ Agent 日志入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-
 | --- | --- | --- |
 | `requester_id` | string，1—128 字符；稳定且不可逆脱敏的用户标识 | `run.start` 必填；同一 Trace 后续事件可继承或重复携带 |
 | `original_request` | string，1—2000 字符；脱敏后的用户原始请求摘要或正文 | `run.start` 必填 |
-| `expected_purpose` | string，最多 1000 字符；允许缺失或为空，不以 original_request 顶替 | 可选；缺省不影响接收，也不使 Trace 变为上下文不完整 |
+| `expected_purpose` | string，1—1000 字符；Agent 预期目的，不以 original_request 顶替 | `run.start` 必填 |
 | `agent_result` | string，1—2000 字符；Agent 最终执行结果或失败摘要 | `run.final_result`、`run.failed` 必填；失败事件填写失败原因 |
 
-V1.1 的必填任务级字段是 `requester_id`、`original_request`、`agent_result` 三个；`expected_purpose` 属于可选增强，用于对比用户诉求与 Agent 自述目的，缺省不阻断接入。这些字段不要求每条 `tool.*` 事件重复携带完整请求文本。服务端会按 `(agent_id, trace_id)` 归并并在批量读取 API、Dashboard 和审计证据中提供。历史事件缺少这些字段时保留为空，不回填猜测值。
+当前只有一套严格校验规则，不再提供 compat/strict 模式开关。HTTP 上传与本地 NDJSON 导入使用相同契约；旧的 `AUDIT_INGEST_STRICT_MODE`、`ingest.defaultMode`、`agents[agentId].ingestMode` 均不能降低校验要求。
 
-服务端按 Agent 决定上述必填校验的强度（接收模式），解析优先级从高到低：
+`run.start` 缺少发起人、原始请求或 Agent 预期目的，以及终止事件缺少最终结果时，HTTP 返回 400 `missing_required_task_field`。必填文本不能是空白。四个任务字段的类型、长度和脱敏校验始终生效，命中未脱敏手机号、邮箱或身份证号模式时返回 400 `redaction_required`。这是检测并拒收，不是自动脱敏。
 
-1. 该 Agent 在服务端 `config.agents[agentId].ingestMode` 中的独立设置；
-2. 服务端环境变量 `AUDIT_INGEST_STRICT_MODE`（全局默认）；
-3. 内置默认 `compat`。
-
-| 模式 | 对接入方的实际影响 |
-| --- | --- |
-| `compat`（默认） | 类型或长度非法仍会拒绝该条事件；任务字段缺失不拒绝，事件照常入库，对应 Trace 标记为"任务上下文不完整" |
-| `strict` | `run.start` 缺 `requester_id`/`original_request`，或 `run.final_result`/`run.failed` 缺 `agent_result` 时，该条事件返回 400 `missing_required_task_field` 被拒绝；缺 `expected_purpose` 不在拒绝范围内 |
-
-接入方无需主动申请模式切换：新接入在验收阶段会由服务端切到 `strict` 验证，验收通过后该 Agent 固定在 `strict` 模式运行。两种模式下，类型、长度和请求体积非法都会同步拒绝，必填缺失和脱敏命中的处理随模式变化。服务端扫描四个任务字段中的手机号、邮箱和身份证号模式；compat 保留证据并记录 redaction_hits，strict 返回 400 redaction_required。该计数由 /health 按 Agent 汇总，不进入任务详情和读取 API。
+四个任务字段不要求每条工具事件重复携带。服务端按 `(agent_id, trace_id)` 聚合；未提供的 Span 保存为 NULL，不补造 ID。缺少 Span 时仍可审计任务结果，但不能可靠配对并发调用或推断父子关系，也不会仅因缺少 Span 判定链路中断。工具调用次数以明确的 `tool.start` 为依据，不把其结束事件再次计数。已有历史数据不重新执行接入校验，不猜测补齐字段；重新上传的旧格式事件仍须满足新规则。
 
 成功任务最小生命周期示例（同一任务共享 Trace 和根 Span）：
 
@@ -463,21 +453,21 @@ V1.1 的必填任务级字段是 `requester_id`、`original_request`、`agent_re
 
 ### 5.3 条件必填与链路增强字段
 
-HTTP ingest 的八个基础字段只保证“事件可接收”，不能保证“链路可复盘”。新改造还必须按事件类型满足以下条件：
+HTTP ingest 的七个基础字段只保证“事件可接收”，不能保证“链路可复盘”。新改造还必须按事件类型满足以下条件：
 
 | 事件或场景 | 条件必填内容 |
 | --- | --- |
-| `run.start` | 任务目标、触发来源、`requester_id`、`original_request`；使用 Run 根 Span。`expected_purpose` 为可选补充 |
-| `agent.start` | `parent_span_id`；`llm_intent.input` 写目标与约束，`output` 写计划或下一步动作摘要 |
-| `tool.start` | `parent_span_id`；`llm_intent.input` 写触发上下文摘要，`output` 写调用原因和预期影响 |
+| `run.start` | `requester_id`、`original_request`、`expected_purpose`；缺少任一字段拒收 |
+| `agent.start` | 可选 `parent_span_id`；`llm_intent.input` 写目标与约束，`output` 写计划或下一步动作摘要 |
+| `tool.start` | 可选 `parent_span_id`；`llm_intent.input` 写触发上下文摘要，`output` 写调用原因和预期影响 |
 | `tool.end`/`tool.error` | `duration_ms`；实际结果或失败摘要 |
 | `run.final_result` | `agent_result`；任务成功结果摘要 |
 | `run.failed` | `agent_result`；任务失败原因摘要 |
 | `run.waiting_user` | 决策标识、待确认摘要、确认对象摘要或哈希 |
 | `run.resume` | 相同决策标识、用户选择和已脱敏的决定人标识 |
 | 高风险执行 | 授权引用和与预览一致的确认对象摘要或哈希 |
-| 业务重试 | 新 `span_id`、尝试次数和上一尝试 Span |
-| 子 Agent | 相同 `trace_id`，子 Agent Span 的父级指向委派 Span |
+| 业务重试 | 记录尝试次数；若使用 Span，提供新 `span_id` 和上一尝试 Span |
+| 子 Agent | 传播相同 `trace_id`；若使用 Span，可通过父级关联委派。注意：服务端按 `(agent_id, trace_id)` 分别聚合，不同 Agent 不会合并为一个任务 |
 
 `llm_intent` 的字段语义固定为：
 
@@ -609,7 +599,7 @@ network database file notification llm
 1. 网络错误或超时导致没有可解析响应时，本次事件未确认，进入重试队列。
 2. 单事件只有 `accepted === 1` 且 `rejected === 0` 才算确认。
 3. 批次可能部分接收；即使返回 400 或 413，只要响应含 `accepted`、`rejected` 和 `errors[].index`，也要保留拒收行、移除已确认行，不重发整批。
-4. `400` 包括 JSON 格式、字段类型、长度、strict 必填缺失或脱敏命中；`413 payload_too_large` 包括请求超过 1 MiB 或单行超过 64 KiB；`415` 表示 Content-Type 错误。修复后再发送，不能无限快速重试。
+4. `400` 包括 JSON 格式、字段类型、长度、任务必填字段缺失或脱敏命中；`413 payload_too_large` 包括请求超过 1 MiB 或单行超过 64 KiB；`415` 表示 Content-Type 错误。修复后再发送，不能无限快速重试。
 5. 请求体整体超限会在解析前拒绝整批；单行超限会继续检查其他行，返回完整拒收索引。
 
 ### 6.3 回放与去重

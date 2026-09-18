@@ -9,12 +9,6 @@ import {
 
 const DEFAULT_MAX_LINE_BYTES = 64 * 1024;
 
-export function resolveIngestMode(config = {}, agentId) {
-  return config.agents?.[agentId]?.ingestMode
-    ?? config.ingest?.defaultMode
-    ?? (process.env.AUDIT_INGEST_STRICT_MODE?.trim().toLowerCase() === 'strict' ? 'strict' : 'compat');
-}
-
 export function countRedactionHits(entry) {
   // One combined pattern prevents a phone-like substring inside an ID being counted twice.
   const pattern = /(?<!\d)(?:\d{17}[\dXx]|1[3-9]\d{9})(?!\d)|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
@@ -30,7 +24,7 @@ function isBlankOptional(value) {
   return value == null || value === '';
 }
 
-export function validateLogEntry(entry, lineNumber, options = {}) {
+export function validateLogEntry(entry, lineNumber) {
   const errors = [];
 
   if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
@@ -63,8 +57,10 @@ export function validateLogEntry(entry, lineNumber, options = {}) {
     errors.push(`line ${lineNumber}: product_id is not allowed; use entity.type and entity.id`);
   }
 
-  if (!isBlankOptional(entry.parent_span_id) && typeof entry.parent_span_id !== 'string') {
-    errors.push(`line ${lineNumber}: parent_span_id must be a string when present`);
+  for (const field of ['span_id', 'parent_span_id']) {
+    if (entry[field] != null && (typeof entry[field] !== 'string' || !entry[field].trim())) {
+      errors.push(`line ${lineNumber}: ${field} must be a non-empty string when present`);
+    }
   }
 
   if (!isBlankOptional(entry.user_id) && typeof entry.user_id !== 'string') {
@@ -120,10 +116,10 @@ export function validateLogEntry(entry, lineNumber, options = {}) {
     }
   }
 
-  if (options.mode === 'strict' && canonicalEvent) {
+  if (canonicalEvent) {
     const requiredFields = EVENT_REQUIRED_TASK_FIELDS[canonicalEvent] ?? [];
     for (const field of requiredFields) {
-      if (isBlankOptional(entry[field])) {
+      if (isBlankOptional(entry[field]) || (typeof entry[field] === 'string' && !entry[field].trim())) {
         errors.push({ code: 'missing_required_task_field', field, message: `line ${lineNumber}: missing required field "${field}"` });
       }
     }
@@ -136,9 +132,7 @@ export function validateLogEntry(entry, lineNumber, options = {}) {
   const redactionHits = countRedactionHits(entry);
   if (redactionHits > 0) {
     console.warn(JSON.stringify({ event: 'audit.ingest.redaction_detected', redaction_hits: redactionHits }));
-    if (options.mode === 'strict') {
-      errors.push({ code: 'redaction_required', message: `line ${lineNumber}: task fields contain unredacted personal data` });
-    }
+    errors.push({ code: 'redaction_required', message: `line ${lineNumber}: task fields contain unredacted personal data` });
   }
 
   return errors;
@@ -161,10 +155,7 @@ export function parseNdjson(content, options = {}) {
     }
     try {
       const entry = JSON.parse(line);
-      const validationErrors = validateLogEntry(entry, lineNumber, {
-        ...options,
-        mode: options.config ? resolveIngestMode(options.config, entry?.agent_id) : options.mode,
-      });
+      const validationErrors = validateLogEntry(entry, lineNumber);
       if (validationErrors.length > 0) {
         errors.push(...validationErrors);
         continue;
@@ -186,7 +177,7 @@ export function normalizeEntry(entry) {
     ts: entry.ts,
     agent_id: entry.agent_id,
     trace_id: entry.trace_id,
-    span_id: entry.span_id,
+    span_id: entry.span_id ?? null,
     parent_span_id: entry.parent_span_id === '' ? null : (entry.parent_span_id ?? null),
     event: canonicalEvent ?? 'unknown',
     tool_name: entry.tool_name,

@@ -12,6 +12,12 @@ import { createAuditIngestService } from '../../src/auditReview/ingestService.js
 import { createRetentionService } from '../../src/auditReview/retention.js';
 import { createHttpApp } from '../../src/adapters/http/app.js';
 import { resolveSpoolDir } from '../../src/adapters/http/ingestRoute.js';
+import { createTraceAggregator } from '../../src/auditReview/traceAggregator.js';
+import { createTraceStore } from '../../src/auditReview/traceStore.js';
+import { createLockStore } from '../../src/auditReview/lockStore.js';
+import { createApiTokenService } from '../../src/auditReview/apiTokenService.js';
+import { createVisualization } from '../../src/auditReview/visualization.js';
+import { createDashboardAuth } from '../../src/auditReview/dashboardAuth.js';
 
 function makeEvent(overrides = {}) {
   return {
@@ -448,78 +454,42 @@ test('POST /v1/ingest rejects path-special agent_id values without writing spool
   }
 });
 
-test('POST /v1/ingest applies strict task-field requirements per agent', async () => {
-  await withIngestServer(async ({ baseUrl, config, db }) => {
-    const strictEvent = makeEvent({
-      agent_id: 'strict-agent',
-      event: 'run.start',
-      span_id: 'strict-start',
-    });
-    const response = await fetch(`${baseUrl}/v1/ingest`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(strictEvent),
-    });
 
-    assert.equal(response.status, 400);
-    const body = await response.json();
-    assert.equal(body.errors[0].error_code, 'missing_required_task_field');
-    assert.equal(body.trace_id, 'trace-1');
-    assert.equal(
-      db.prepare('SELECT COUNT(*) AS count FROM audit_events WHERE trace_id = ?').get('trace-1').count,
-      0
-    );
-
-    const compatEvent = makeEvent({
-      agent_id: 'compat-agent',
-      event: 'run.start',
-      trace_id: 'compat-trace',
-      span_id: 'compat-start',
-    });
-    const compatResponse = await fetch(`${baseUrl}/v1/ingest`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(compatEvent),
-    });
-
-    assert.equal(compatResponse.status, 202);
-    assert.match(readSpool(config, 'compat-agent'), /compat-trace/);
-    assert.equal(
-      db.prepare('SELECT COUNT(*) AS count FROM audit_events WHERE trace_id = ?').get('compat-trace').count,
-      1
-    );
-  }, {
-    agents: {
-      'strict-agent': { ingestMode: 'strict' },
-    },
-  });
+test('POST /v1/ingest requires task context for every Agent despite obsolete mode settings', async () => {
+  await withIngestServer(async ({ baseUrl, db }) => {
+    for (const agent_id of ['remote-agent', 'legacy-agent']) {
+      const response = await fetch(`${baseUrl}/v1/ingest`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(makeEvent({ agent_id, event: 'run.start' })),
+      });
+      assert.equal(response.status, 400);
+      const body = await response.json();
+      assert.deepEqual(body.errors.map(e => e.field), ['requester_id', 'original_request', 'expected_purpose']);
+    }
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM audit_events').get().count, 0);
+  }, { agents: { 'legacy-agent': { ingestMode: 'compat' } }, ingest: { defaultMode: 'compat' } });
 });
 
-test('POST /v1/ingest accepts strict run.start without optional expected_purpose', async () => {
-  await withIngestServer(async ({ baseUrl, config }) => {
-    const event = makeEvent({
-      agent_id: 'strict-agent',
-      event: 'run.start',
-      requester_id: 'user-1',
-      original_request: 'Deploy service',
-      trace_id: 'strict-complete',
-      span_id: 'strict-complete',
-    });
-    const response = await fetch(`${baseUrl}/v1/ingest`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(event),
-    });
-
+test('POST /v1/ingest rejects missing purpose and accepts valid run.start without either Span', async () => {
+  await withIngestServer(async ({ baseUrl, config, db }) => {
+    const event = makeEvent({ event: 'run.start', requester_id: 'user-1', original_request: 'Deploy service',
+      span_id: undefined, parent_span_id: undefined });
+    const send = entry => fetch(`${baseUrl}/v1/ingest`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(entry) });
+    const rejected = await send(event);
+    assert.equal(rejected.status, 400);
+    assert.equal((await rejected.json()).errors[0].field, 'expected_purpose');
+    const response = await send({ ...event, expected_purpose: 'Deliver the approved service version' });
     assert.equal(response.status, 202);
     assert.deepEqual(await response.json(), { accepted: 1, rejected: 0, errors: [] });
-    assert.match(readSpool(config, 'strict-agent'), /strict-complete/);
-  }, {
-    agents: { 'strict-agent': { ingestMode: 'strict' } },
+    const row = db.prepare('SELECT * FROM audit_events').get();
+    assert.equal(row.span_id, null);
+    assert.equal(row.parent_span_id, null);
+    assert.equal(Object.hasOwn(JSON.parse(row.raw_json), 'span_id'), false);
+    assert.match(readSpool(config, 'remote-agent'), /Deliver the approved service version/);
   });
 });
 
-test('POST /v1/ingest rejects task-field type and length errors in both modes', async () => {
+test('POST /v1/ingest rejects task-field type and length errors regardless of legacy config', async () => {
   const cases = [
     {
       overrides: { requester_id: { user: 'id' } },
@@ -542,6 +512,7 @@ test('POST /v1/ingest rejects task-field type and length errors in both modes', 
             event: 'run.start',
             requester_id: 'user-1',
             original_request: 'valid request',
+            expected_purpose: 'validate task context',
             ...item.overrides,
           })),
         });
@@ -694,31 +665,18 @@ test('task validation reports every bad row and persists valid batch rows', asyn
   });
 });
 
-test('redaction fallback counts all task fields and strict refuses before persistence', async () => {
-  for (const mode of ['compat', 'strict']) {
-    await withIngestServer(async ({ baseUrl, db, ingestService }) => {
-      const event = makeEvent({ requester_id: 'a@example.test', original_request: '13800138000',
-        expected_purpose: '11010519491231002X', agent_result: 'b@example.test', ingested_at: '1900-01-01' });
-      const response = await fetch(`${baseUrl}/v1/ingest`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(event),
-      });
-      assert.equal(response.status, mode === 'strict' ? 400 : 202);
-      const row = db.prepare('SELECT * FROM audit_events').get();
-      if (mode === 'strict') {
-        assert.equal(row, undefined);
-        assert.equal((await response.json()).error_code, 'redaction_required');
-      } else {
-        assert.equal(row.redaction_hits, 4);
-        assert.match(row.ingested_at, /^\d{4}-.*Z$/);
-        assert.notEqual(row.ingested_at, event.ingested_at);
-        assert.equal(row.original_request, event.original_request);
-        assert.equal(ingestService.ingestSince({ sinceDate: '2026-07-06' }).inserted, 0);
-        assert.equal(db.prepare('SELECT ingested_at FROM audit_events').get().ingested_at, row.ingested_at);
-      }
-    }, { agents: { 'remote-agent': { ingestMode: mode } } });
-  }
+test('unredacted task fields are rejected before persistence under the single contract', async () => {
+  await withIngestServer(async ({ baseUrl, db }) => {
+    const event = makeEvent({ requester_id: 'a@example.test', original_request: '13800138000',
+      expected_purpose: '11010519491231002X', agent_result: 'b@example.test' });
+    const response = await fetch(`${baseUrl}/v1/ingest`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(event),
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error_code, 'redaction_required');
+    assert.equal(db.prepare('SELECT * FROM audit_events').get(), undefined);
+  });
 });
-
 
 test('NDJSON reports oversized lines as 413 and continues validating the batch', async () => {
   await withIngestServer(async ({ baseUrl, db }) => {
@@ -735,6 +693,42 @@ test('NDJSON reports oversized lines as 413 and continues validating the batch',
   }, { ingest: { http: { maxBodyBytes: 4096, maxLineBytes: 512 } } });
 });
 
+
+test('spanless tasks round-trip through HTTP ingestion, audit, authenticated export and Dashboard', async () => {
+  let token;
+  await withIngestServer(async ({ baseUrl, db }) => {
+    const batch = buildDemoTrace('normal');
+    const events = batch.events.map(({ span_id, parent_span_id, ...event }) => event);
+    const post = await fetch(`${baseUrl}/v1/ingest`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ events }),
+    });
+    assert.equal(post.status, 202);
+    assert.equal((await post.json()).accepted, events.length);
+    const aggregator = createTraceAggregator({ db, config: {}, traceStore: createTraceStore(db), lockStore: createLockStore(db),
+      llmReviewer: { reviewTrace() { throw new Error('No model call expected'); } } });
+    await aggregator.run();
+    const response = await fetch(`${baseUrl}/v1/audit-logs?trace_id=${batch.traceId}`, { headers: { Authorization: `Bearer ${token}` } });
+    assert.equal(response.status, 200);
+    const { traces } = await response.json();
+    assert.equal(traces.length, 1);
+    assert.equal(traces[0].context_status, 'complete');
+    assert.equal(traces[0].audit_result.trace_status, 'success');
+    assert.equal(traces[0].expected_purpose, events[0].expected_purpose);
+    assert.equal(traces[0].events.length, events.length);
+    assert.ok(traces[0].events.every(e => e.span_id === null && e.parent_span_id === null && !Object.hasOwn(e.raw_json, 'span_id')));
+    const page = await fetch(`${baseUrl}/dashboard/agents/${batch.agentId}/traces/${batch.traceId}`);
+    assert.equal(page.status, 200);
+    const html = await page.text();
+    assert.ok(html.includes(events[0].expected_purpose));
+    assert.ok(html.includes(events[0].original_request));
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM audit_events').get().n, events.length);
+  }, { ingest: { http: { maxBodyBytes: 1024 * 1024, maxLineBytes: 64 * 1024 } } }, ({ db, config }) => {
+    const apiTokenService = createApiTokenService({ db });
+    token = apiTokenService.create('测试调用方').token;
+    return { apiTokenService, scheduler: {}, reviewStore: {}, dashboardAuth: createDashboardAuth({ config, env: {} }),
+      visualization: createVisualization({ db, reviewStore: {}, config }) };
+  });
+});
 
 test('all demo generators pass strict HTTP ingestion with task context', async () => {
   await withIngestServer(async ({ baseUrl, db }) => {
@@ -756,5 +750,5 @@ test('all demo generators pass strict HTTP ingestion with task context', async (
       assert.equal(final.status, kind === 'high-risk' ? 'UNAVAILABLE' : 'OK');
       assert.equal(start.redaction_hits, 0);
     }
-  }, { ingest: { defaultMode: 'strict', http: { maxBodyBytes: 1024 * 1024, maxLineBytes: 64 * 1024 } } });
+  }, { ingest: { http: { maxBodyBytes: 1024 * 1024, maxLineBytes: 64 * 1024 } } });
 });

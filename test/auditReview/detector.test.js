@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
   ts TEXT NOT NULL,
   agent_id TEXT NOT NULL,
   trace_id TEXT NOT NULL,
-  span_id TEXT NOT NULL,
+  span_id TEXT,
   parent_span_id TEXT,
   event TEXT NOT NULL,
   tool_name TEXT NOT NULL,
@@ -38,7 +38,7 @@ function mk(db, n, opts) {
     ts: opts.ts ?? '2026-07-03T10:00:00.000Z',
     agent_id: opts.agent_id ?? 'mt-agent',
     trace_id: opts.trace_id ?? 'trace-1',
-    span_id: opts.span_id ?? `span-${n}`,
+    span_id: Object.hasOwn(opts, 'span_id') ? opts.span_id : `span-${n}`,
     parent_span_id: null,
     event: opts.event ?? 'tool.end',
     tool_name: opts.tool_name ?? 'some.tool',
@@ -72,6 +72,26 @@ function makeDb() {
   db.exec(SCHEMA);
   return db;
 }
+
+test('spanless lifecycle rows count starts once and do not imply missing child endings', () => {
+  const db = makeDb();
+  try {
+    for (let i = 0; i < 26; i++) {
+      mk(db, i * 2, { span_id: null, event: 'tool.start', tool_name: `read-${i}` });
+      mk(db, i * 2 + 1, { span_id: null, event: 'tool.end', tool_name: `read-${i}` });
+    }
+    const detector = createCandidateDetector({ db, riskPolicy: { repeatThreshold: 5, traceToolChainStepThreshold: 50 } });
+    const read = () => detector.detect({ windowFrom: '2026-07-03T10:00:00.000Z', windowTo: '2026-07-03T10:30:00.000Z', maxEventsPerReview: 500 }).candidates;
+    assert.ok(read().every(c => !['trace_integrity', 'repeated_call'].includes(c.category) && !c.reason.includes('tool-chain steps')));
+    for (let i = 0; i < 5; i++) {
+      mk(db, 100 + i * 2, { span_id: null, event: 'tool.start', tool_name: 'repeat' });
+      mk(db, 101 + i * 2, { span_id: null, event: 'tool.end', tool_name: 'repeat' });
+    }
+    const repeated = read().filter(c => c.category === 'repeated_call');
+    assert.equal(repeated.length, 1);
+    assert.match(repeated[0].reason, /5 calls/);
+  } finally { db.close(); }
+});
 
 function mkNormalized(db, n, opts) {
   const normalized = normalizeEntry({
