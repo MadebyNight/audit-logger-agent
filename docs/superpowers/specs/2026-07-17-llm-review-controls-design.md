@@ -44,7 +44,7 @@
 - `src/llm/openaiResponsesClient.js`
 - 对应的 Scheduler、Mapper、OpenAI 配置和 Responses Client 测试
 
-不修改已经重写的 `docs/agent-audit-log-integration-guide.md`，因为该文档面向上游 Agent 接入，不负责审计服务自身的 LLM 运行配置。
+不修改已经重写的 `agent-audit-log-integration-guide.md`，因为该文档面向上游 Agent 接入，不负责审计服务自身的 LLM 运行配置。
 
 ## 验证
 

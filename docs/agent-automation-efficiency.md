@@ -32,6 +32,6 @@
 ## 相关文档
 
 - [项目总览](../README.md)
-- [其他 Agent 接入日志审计服务指南](agent-audit-log-integration-guide.md)
+- [其他 Agent 接入日志审计服务指南](../agent-audit-log-integration-guide.md)
 - [飞书 Bot 审计通知方案](feishu-bot-notification-design.md)
 - [Dokploy 部署说明](dokploy-deployment.md)

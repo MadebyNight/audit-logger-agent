@@ -47,13 +47,15 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:9320/health'
 
 ## Dokploy 生产入口
 
-生产复用 Dokploy/Traefik 终止 TLS，容器内部保持 HTTP `:9320`。部署后将实际正式域名设置为 `AUDIT_AGENT_DASHBOARD_BASE_URL=https://<正式域名>`；本仓库不声明示例地址已经上线。
+正式服务域名为 `https://audit.madebynight.top`。生产复用 Dokploy/Traefik 终止 TLS，容器内部保持 HTTP `:9320`。在 Dokploy 环境变量中设置 `AUDIT_AGENT_DASHBOARD_BASE_URL=https://audit.madebynight.top`；仅配置 Domains 不会自动设置该变量。
 
 | 入口 | 地址 |
 | --- | --- |
-| Dashboard | `https://<正式域名>/dashboard` |
-| 批量读取 | `https://<正式域名>/v1/audit-logs`（Bearer Token） |
-| Agent 日志发送 | `https://<受控写入域名>/v1/ingest` |
+| Dashboard | `https://audit.madebynight.top/dashboard` |
+| Agent 任务入口 | `https://audit.madebynight.top/tasks` |
+| 批量读取 | `https://audit.madebynight.top/v1/audit-logs`（Bearer Token） |
+| Agent 日志发送 | `https://audit.madebynight.top/v1/ingest` |
+| 外部健康检查 | `https://audit.madebynight.top/health` |
 | 容器健康检查 | `http://127.0.0.1:9320/health` |
 
 默认不公开无认证 ingest；跨网络写入先配置 Traefik 鉴权或受控内网 HTTPS 路由。容器 `requireHttpsBaseUrl=true`，未设置有效 HTTPS 基地址会拒绝启动。详见[部署说明](docs/dokploy-deployment.md)。
@@ -76,7 +78,7 @@ V1.1 以 `(agent_id, trace_id)` 聚合完整任务，Dashboard 按 Agent → 发
 ## 文档
 
 - [Dokploy 部署说明](docs/dokploy-deployment.md)：生产部署、变量、域名、网络边界、Dashboard 和备份恢复。
-- [其他 Agent 接入日志审计服务指南](docs/agent-audit-log-integration-guide.md)：可直接交给编码 Agent 执行，覆盖仓库审计、日志字段契约、自动改造流程、真实发送和 Dashboard 验收。
+- [其他 Agent 接入日志审计服务指南](agent-audit-log-integration-guide.md)：可直接交给编码 Agent 执行，覆盖仓库审计、日志字段契约、自动改造流程、真实发送和 Dashboard 验收。
 
 ## Audit Logger Agent 审计效率
 
@@ -109,7 +111,7 @@ V1.1 以 `(agent_id, trace_id)` 聚合完整任务，Dashboard 按 Agent → 发
 ### 相关文档
 
 - [项目总览](#audit-logger-agent)
-- [其他 Agent 接入日志审计服务指南](docs/agent-audit-log-integration-guide.md)
+- [其他 Agent 接入日志审计服务指南](agent-audit-log-integration-guide.md)
 - [飞书 Bot 审计通知方案](docs/feishu-bot-notification-design.md)
 - [Dokploy 部署说明](docs/dokploy-deployment.md)
 

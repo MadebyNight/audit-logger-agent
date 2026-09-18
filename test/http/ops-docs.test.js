@@ -53,12 +53,20 @@ test('README links human users to deployment and Agent integration guides', () =
 
   for (const required of [
     'docs/dokploy-deployment.md',
-    'docs/agent-audit-log-integration-guide.md',
+    '(agent-audit-log-integration-guide.md)',
     '/dashboard',
   ]) {
     assert.ok(readme.includes(required), `README should include ${required}`);
   }
   assert.ok(readme.includes('Dashboard 页面可直接访问'));
+  const integrationGuide = readText('agent-audit-log-integration-guide.md');
+  for (const document of [readme, integrationGuide]) {
+    assert.ok(document.includes('https://audit.madebynight.top/v1/ingest'));
+    assert.ok(document.includes('https://audit.madebynight.top/v1/audit-logs'));
+    assert.ok(document.includes('AUDIT_AGENT_DASHBOARD_BASE_URL=https://audit.madebynight.top'));
+    assert.doesNotMatch(document, /https:\/\/[^\s]*traefik\.me/);
+    assert.doesNotMatch(document, /docs\/agent-audit-log-integration-guide\.md/);
+  }
   assert.doesNotMatch(readme, /"AUDIT_AGENT_DASHBOARD_TOKEN"\s*:/);
 });
 

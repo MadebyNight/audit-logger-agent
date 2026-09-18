@@ -15,7 +15,7 @@
 - V1.1 任务审计设计：`docs/superpowers/specs/2026-09-14-v1.1-audit-task-review-design.md`。
 - Dashboard 信息架构、交互与视觉参考：上述文档第 12.5 节，以及 `docs/superpowers/specs/assets/v1.1-dashboard/source/` 中的四页 HTML 和 `base.css`。
 - 功能一致性检查记录：`docs/superpowers/specs/2026-09-15-v1.1-functional-consistency-review.md`。
-- 接入说明：`docs/agent-audit-log-integration-guide.md`。
+- 接入说明：`agent-audit-log-integration-guide.md`。
 - 部署说明：`docs/dokploy-deployment.md`。文档不能替代对实际运行环境的核实。
 
 ## Dashboard 当前约定

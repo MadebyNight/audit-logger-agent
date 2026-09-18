@@ -1082,7 +1082,7 @@ export function createVisualization({ reviewStore, traceStore, db, config, llmCl
       agents_count: new Set(stateRows.map(row => row.agent_id || 'Agent 未知')).size,
       requesters_count: new Set(stateRows.map(row => row.requester_id || '发起人未知')).size,
       agents: grouped('agent_id', 'Agent 未知', (agent) => taskHref({ agent_id: agent, sort: 'priority', page: '1' })), requesters: grouped('requester_id', '发起人未知', (requester) => taskHref({ requester: requester === '发起人未知' ? 'unknown' : `id:${requester}`, sort: 'priority', page: '1' })),
-      attention_href: taskHref({ state: 'attention', sort: 'priority', page: '1' }), attention: attention.slice().sort((a, b) => String(b.last_event_at ?? '').localeCompare(String(a.last_event_at ?? ''))).slice(0, 5).map((row) => ({ request: row.original_request || '未记录原始请求', agent_id: row.agent_id, href: traceUrl(row.agent_id, row.trace_id) })), api: { ingest_url: `${baseUrl}/v1/ingest`, read_url: `${baseUrl}/v1/audit-logs`, docs_url: '/docs/agent-audit-log-integration-guide.md' },
+      attention_href: taskHref({ state: 'attention', sort: 'priority', page: '1' }), attention: attention.slice().sort((a, b) => String(b.last_event_at ?? '').localeCompare(String(a.last_event_at ?? ''))).slice(0, 5).map((row) => ({ request: row.original_request || '未记录原始请求', agent_id: row.agent_id, href: traceUrl(row.agent_id, row.trace_id) })), api: { ingest_url: `${baseUrl}/v1/ingest`, read_url: `${baseUrl}/v1/audit-logs`, docs_url: '/agent-audit-log-integration-guide.md' },
     } };
   }
 

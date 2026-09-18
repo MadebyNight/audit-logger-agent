@@ -18,16 +18,20 @@
 4. 改造完成后，编码 Agent 必须运行一次真实且无破坏性的 Agent 任务，将验证用 `trace_id`、查询结果和 Dashboard 地址交付给用户。
 5. 用户或编码 Agent 必须在 Dashboard 中看到目标 `agent_id`、任务记录和最近活动时间。看不到就不算完成。
 
-默认审计服务地址：
+正式审计服务地址：
 
 ```text
-服务基地址：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me
-日志接收地址：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/v1/ingest
-Agent 任务入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/tasks
-审计 Dashboard：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/dashboard
+服务基地址：https://audit.madebynight.top
+日志接收地址：https://audit.madebynight.top/v1/ingest
+批量读取地址：https://audit.madebynight.top/v1/audit-logs
+Agent 任务入口：https://audit.madebynight.top/tasks
+审计 Dashboard：https://audit.madebynight.top/dashboard
+健康检查地址：https://audit.madebynight.top/health
 ```
 
-生产公网入口必须使用 HTTPS；本地开发可使用 `http://127.0.0.1:9320`。上述域名需部署方完成证书与路由配置后使用。
+生产入口统一使用上述正式 HTTPS 域名，不再使用旧的 `traefik.me` 地址；本地开发可使用 `http://127.0.0.1:9320`。接入前按阶段六检查服务健康状态。
+
+上游 Agent 设置 `AUDIT_INGEST_URL=https://audit.madebynight.top/v1/ingest`；审计服务端在 Dokploy 中设置 `AUDIT_AGENT_DASHBOARD_BASE_URL=https://audit.madebynight.top`。两者分别用于日志上传和 Dashboard 链接生成，不要混用。
 
 如用户提供了其他环境的地址，以用户提供的 `AUDIT_INGEST_URL` 和 Dashboard 基地址为准。
 
@@ -263,7 +267,7 @@ catalog.update.verify
 先检查服务：
 
 ```powershell
-$auditBaseUrl = 'https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me'
+$auditBaseUrl = 'https://audit.madebynight.top'
 $agentId = '<目标 Agent 的实际 agent_id>'
 $env:AUDIT_INGEST_URL = "$auditBaseUrl/v1/ingest"
 
@@ -303,8 +307,8 @@ $result.traces | ForEach-Object { $_.events } | Format-Table ts, agent_id, event
 最后打开 Dashboard：
 
 ```text
-Agent 任务入口：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/tasks
-目标 Agent 审计视图：https://auditloggeragent-auditloggeragent-mue8ko-342fc3-18-141-240-9.traefik.me/tasks?agent_id=<URL 编码后的 agent_id>
+Agent 任务入口：https://audit.madebynight.top/tasks
+目标 Agent 审计视图：https://audit.madebynight.top/tasks?agent_id=<URL 编码后的 agent_id>
 ```
 
 在 Agent 日志入口确认：
