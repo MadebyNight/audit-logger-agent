@@ -20,7 +20,7 @@ ENV NODE_ENV=production \
     AUDIT_AGENT_BIND_HOST=0.0.0.0
 
 COPY --from=dependencies --chown=node:node /app/node_modules ./node_modules
-COPY --chown=node:node package.json config.container.json ./
+COPY --chown=node:node package.json config.container.json agent-audit-log-integration-guide.md ./
 COPY --chown=node:node scripts ./scripts
 COPY --chown=node:node src ./src
 

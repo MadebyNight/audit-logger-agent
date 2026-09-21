@@ -43,6 +43,10 @@ export function renderApiTokenDrawer({ accounts, records, token, error, open, re
 .api-token-drawer .at-secret input{font-family:monospace}
 .api-token-drawer .at-empty{padding:24px;border:1px dashed #3b4e5e;border-radius:12px;color:#9fb0bf;text-align:center}
 .api-token-drawer .at-error{color:#ffb4ac}
+.api-token-drawer .at-guide{display:grid;gap:12px;min-width:0;scroll-margin-top:110px}
+.api-token-drawer .at-guide ol{margin:0;padding-left:22px;display:grid;gap:8px}
+.api-token-drawer .at-guide a{color:#b9f4d0;text-decoration:underline;text-underline-offset:3px}
+.api-token-drawer .at-guide textarea{width:100%;min-width:0;resize:vertical;padding:12px;background:#0b1219;color:#c8d8e5;border:1px solid #3c4f5e;border-radius:8px;font:13px/1.7 "Microsoft YaHei",sans-serif}
 @media(max-width:720px){.api-token-drawer{width:100vw}.api-token-drawer .at-header{padding:20px}.api-token-drawer .at-content{padding:20px;gap:24px}.head:has(.api-token-launch){padding-top:76px}.head>.api-token-launch{top:16px}.api-token-launch{padding:8px 12px}}
 @media(prefers-reduced-motion:reduce){.api-token-drawer button{transition:none}}
 </style>
@@ -55,6 +59,8 @@ document.getElementById('close-api-tokens').onclick=()=>drawer.close();
 drawer.querySelectorAll('form').forEach(form=>{const field=document.createElement('input');field.type='hidden';field.name='return_to';field.value=${JSON.stringify(returnTo).replaceAll('<', '\\u003c')};form.append(field);
 form.addEventListener('submit',event=>{if(form.dataset.delete==='true'&&!confirm('删除后该 Token 永久失效，历史调用记录仍会保留。确认删除？')){event.preventDefault();return;}const button=form.querySelector('button');button.disabled=true;button.textContent='处理中…';});});
 const copy=document.getElementById('copy-api-token');if(copy)copy.onclick=async()=>{const field=document.getElementById('new-api-token');try{await navigator.clipboard.writeText(field.value);copy.textContent='已复制';}catch{field.select();document.getElementById('copy-result').textContent='请按 Ctrl+C 或使用系统复制';}};
+const instructions=document.getElementById('agent-api-instructions');instructions.value=instructions.value.replaceAll('__AUDIT_ORIGIN__',location.origin);
+document.getElementById('copy-agent-instructions').onclick=async()=>{const result=document.getElementById('agent-instructions-result');try{await navigator.clipboard.writeText(instructions.value);result.textContent='接入指令已复制，可以交给 Agent。';}catch{instructions.focus();instructions.select();result.textContent='已选中接入指令，请按 Ctrl+C 或使用系统复制。';}};
 ${open ? `drawer.showModal();history.replaceState(null,'',${JSON.stringify(returnTo).replaceAll('<', '\\u003c')});` : ''}
 })();</script>`;
 }
@@ -70,6 +76,21 @@ export function renderApiTokens({ accounts, records, token, error }) {
 ${error ? `<p class="at-error" role="alert">${escape(error)}</p>` : ''}
 <form method="post" action="/dashboard/api-tokens"><label>调用方名称<input name="name" required maxlength="80" placeholder="例如：研发审计 Agent"></label><button class="at-primary" type="submit">申请 Token</button></form>
 ${token ? `<div class="at-secret" role="status"><h3>已生成，请复制保存</h3><p class="at-muted">完整 Token 仅本次展示。</p><label>新 Token<input id="new-api-token" readonly value="${escape(token)}" autocomplete="off"></label><button class="at-primary" type="button" id="copy-api-token">复制 Token</button><span id="copy-result" role="status"></span></div>` : ''}
+</section><section class="at-guide" aria-labelledby="agent-api-guide-heading"><h3 id="agent-api-guide-heading">交给 Agent 使用</h3>
+<p>API 让 Agent 读取审计日志，用于查询任务过程、排查失败和复盘。Token 是调用日志读取 API 的凭证，申请后还需要配置到 Agent。</p>
+<ol><li>申请并保存 Token，完整凭证仅在生成时展示一次。</li><li>在 Agent 的运行环境中设置 <code>AUDIT_READ_TOKEN</code>，值为刚保存的 Token。</li><li>复制下面的接入指令交给 Agent，让它按项目现有方式接入并验证查询。</li></ol>
+<p class="at-muted">接入指令引用环境变量，不包含 Token 本身。申请 Token 不会自动上报日志；如需让被审计 Agent 上报执行过程，请按<a href="/agent-audit-log-integration-guide.md" target="_blank" rel="noopener">完整接入说明</a>单独配置。</p>
+<label for="agent-api-instructions">Agent 接入指令<textarea id="agent-api-instructions" readonly rows="9" spellcheck="false">${escape(`请为当前 Agent 接入审计日志查询能力，用于查询任务过程、排查失败和复盘。
+服务地址：__AUDIT_ORIGIN__
+请先检查项目现有配置与 HTTP 调用方式，再接入以下只读接口：
+GET __AUDIT_ORIGIN__/v1/audit-logs
+从运行环境变量 AUDIT_READ_TOKEN 读取凭证，设置请求头 Authorization: Bearer <该环境变量的值>。
+查询示例：GET __AUDIT_ORIGIN__/v1/audit-logs?agent_id=<实际Agent ID>&trace_id=<实际Trace ID>
+替换占位符并对查询参数进行 URL 编码。没有具体任务 ID 时，可先请求 /v1/audit-logs?limit=1 验证连接。
+检查 HTTP 状态和返回的 traces；空数组表示本次查询没有匹配记录，不代表接入失败。401 时检查 Token 是否正确且已启用。
+此 Token 用于读取日志，不会自动接入日志上报。请沿用项目配置方式保存凭证，不写入日志。
+完整接入说明：__AUDIT_ORIGIN__/agent-audit-log-integration-guide.md`)}</textarea></label>
+<button type="button" id="copy-agent-instructions">复制 Agent 接入指令</button><p id="agent-instructions-result" class="at-muted" role="status"></p>
 </section><section><h3>我的 Token</h3><div class="at-list">
 ${accounts.map(a => `<article class="at-card"><div class="at-card-top"><div><h3>${escape(a.name)}</h3><p class="at-muted">创建于 ${escape(date(a.created_at))}</p></div>${a.revoked_at ? '<span class="at-status">已停用</span>' : ''}</div>
 <div class="at-actions"><form method="post" action="/dashboard/api-tokens/${escape(a.account_id)}/${a.revoked_at ? 'restore' : 'revoke'}"><button class="${a.revoked_at ? 'at-primary' : ''}">${a.revoked_at ? '恢复 Token' : '停用 Token'}</button></form><form method="post" action="/dashboard/api-tokens/${escape(a.account_id)}/delete" data-delete="true"><button class="at-danger">删除 Token</button></form></div>

@@ -569,6 +569,12 @@ export function createHttpApp({ db, config, apiTokenService, scheduler, reviewSt
     }
 
     try {
+      if (method === 'GET' && url.pathname === '/agent-audit-log-integration-guide.md') {
+        const guide = fs.readFileSync(new URL('../../../agent-audit-log-integration-guide.md', import.meta.url), 'utf8');
+        res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+        res.end(guide);
+        return;
+      }
       if (apiTokenService && method === 'POST' && (url.pathname === '/dashboard/api-tokens' || /^\/dashboard\/api-tokens\/[^/]+\/(revoke|restore|delete)$/.test(url.pathname))) {
         const form = await readForm(req, maxBodyBytes(config));
         try {
@@ -587,6 +593,8 @@ export function createHttpApp({ db, config, apiTokenService, scheduler, reviewSt
         const allowedReturn = returnUrl.origin === 'http://127.0.0.1' && (['/', '/tasks', '/dashboard'].includes(returnUrl.pathname) || /^\/dashboard\/agents\//.test(returnUrl.pathname));
         url.pathname = allowedReturn ? returnUrl.pathname : '/dashboard';
         url.search = allowedReturn ? returnUrl.search : '';
+        // Render the one-time token on the new homepage without losing it to a redirect.
+        if (url.pathname === '/dashboard' && !url.search) url.pathname = '/';
         method = 'GET';
       }
       if (method === 'GET' && url.pathname === '/v1/audit-logs') {
