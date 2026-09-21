@@ -734,6 +734,11 @@ export function createHttpApp({ db, config, apiTokenService, scheduler, reviewSt
         const auth = dashboardAuth.authorizeDashboard(req);
         const fail = mapAuthFailure(auth);
         if (fail) { html(res, fail.status, `<h1>${fail.body.error}</h1>`, cors); return; }
+        // Keep filtered evidence views and report notices available to existing links.
+        if (!url.search) {
+          redirect(res, '/', cors);
+          return;
+        }
         const filters = dashboardFindingFilters(url, {
           includeReviewId: true,
           includeOverviewControls: true,

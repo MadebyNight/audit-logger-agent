@@ -37,6 +37,10 @@ test('dashboard routes pass normalized finding filters to visualization', async 
     sections: [],
   };
   const visualization = {
+    dataDashboardPage() {
+      calls.push({ route: 'dataDashboard' });
+      return { ...page, page: { title: '新版数据看板入口' } };
+    },
     agentIndexPage() {
       return page;
     },
@@ -71,6 +75,18 @@ test('dashboard routes pass normalized finding filters to visualization', async 
   const baseUrl = `http://127.0.0.1:${port}`;
 
   try {
+    for (const entry of ['/dashboard', '/dashboard/']) {
+      const response = await fetch(`${baseUrl}${entry}`, { redirect: 'manual' });
+      assert.equal(response.status, 303);
+      assert.equal(response.headers.get('location'), '/');
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+      assert.equal(calls.length, 0);
+      const followed = await fetch(`${baseUrl}${entry}`);
+      assert.equal(followed.status, 200);
+      assert.equal(followed.url, `${baseUrl}/`);
+      assert.match(await followed.text(), /新版数据看板入口/);
+      assert.deepEqual(calls.shift(), { route: 'dataDashboard' });
+    }
     const overview = await fetch(
       `${baseUrl}/dashboard?agent_id=agent%2Fone&severity=high&category=failed_call&status=resolved&review_id=review-1&sort=severity_desc&log_page=3&log_event=tool.end&log_tool_name=db.delete&log_trace_id=trace-1&log_status=INTERNAL`,
     );
@@ -298,7 +314,7 @@ test('dashboard manual daily report confirmation and POST map delivery outcomes 
     assert.equal(manualStatuses[0].label, '飞书通知正常');
     assert.equal(manualStatuses[0].date, '2026-07-20');
 
-    const dashboard = await fetch(`${baseUrl}/dashboard`);
+    const dashboard = await fetch(`${baseUrl}/dashboard?status=open`);
     const dashboardHtml = await dashboard.text();
     assert.match(dashboardHtml, /飞书通知正常/);
     assert.match(dashboardHtml, /href="\/dashboard\/daily-report\/send"/);
@@ -345,6 +361,11 @@ test('dashboard manual daily report confirmation and POST map delivery outcomes 
     assert.equal(failed.headers.get('location'), '/dashboard?notice=daily_report_failed');
 
     const deniedGet = await fetch(`${baseUrl}/dashboard/daily-report/send`, { headers: { 'x-deny': '1' } });
+    const deniedEntry = await fetch(`${baseUrl}/dashboard`, {
+      headers: { 'x-deny': '1' }, redirect: 'manual',
+    });
+    assert.equal(deniedEntry.status, deniedGet.status);
+    assert.equal(deniedEntry.headers.get('location'), null);
     assert.equal(deniedGet.status, 403);
     const callsBeforeDeniedPost = runCalls;
     const deniedPost = await fetch(`${baseUrl}/dashboard/daily-report/send`, {
@@ -759,7 +780,7 @@ test.skip('audit review HTTP integration smoke test', async () => {
     {
       const loginPage = await fetch(`${baseUrl}/dashboard/login?token=test-token-123`);
       assert.equal(loginPage.status, 200);
-      assert.equal(loginPage.url, `${baseUrl}/dashboard`);
+      assert.equal(loginPage.url, `${baseUrl}/`);
       const login = await fetch(`${baseUrl}/dashboard/login`, {
         method: 'POST',
         redirect: 'manual',
@@ -785,11 +806,22 @@ test.skip('audit review HTTP integration smoke test', async () => {
       assert.equal(dashboard.status, 200);
       assert.equal(dashboard.headers.get('cache-control'), 'no-store');
       const dashboardHtml = await dashboard.text();
+      assert.equal(dashboard.url, `${baseUrl}/`);
+      assert.ok(dashboardHtml.includes('数据看板'));
+      assert.ok(dashboardHtml.includes('任务工作台'));
+      assert.ok(!dashboardHtml.includes('审计审查总览'));
       assert.equal(dashboardHtml.includes('test-token-123'), false);
       assert.doesNotMatch(dashboardHtml, MOJIBAKE_PATTERN);
       const dashboardWithSlash = await fetch(`${baseUrl}/dashboard/`);
       assert.equal(dashboardWithSlash.status, 200);
+      assert.equal(dashboardWithSlash.url, `${baseUrl}/`);
       assert.equal(dashboardWithSlash.headers.get('cache-control'), 'no-store');
+      for (const entry of ['/dashboard', '/dashboard/']) {
+        const redirectResponse = await fetch(`${baseUrl}${entry}`, { redirect: 'manual' });
+        assert.equal(redirectResponse.status, 303);
+        assert.equal(redirectResponse.headers.get('location'), '/');
+        assert.equal(redirectResponse.headers.get('cache-control'), 'no-store');
+      }
       const agentDashboard = await fetch(`${baseUrl}/dashboard?agent_id=agent-test`);
       assert.equal(agentDashboard.status, 200);
       const agentDashboardHtml = await agentDashboard.text();
@@ -928,10 +960,10 @@ test.skip('audit review HTTP integration smoke test', async () => {
     }
 
     // ------------------------------------------------------------------
-    // Case: GET /dashboard -> 200 text/html with 审计 or Severity
+    // Case: existing filtered overview links retain finding evidence
     // ------------------------------------------------------------------
     {
-      const res = await fetch(`${baseUrl}/dashboard`, { headers: bearerHeaders });
+      const res = await fetch(`${baseUrl}/dashboard?status=open`, { headers: bearerHeaders });
       assert.equal(res.status, 200, 'GET /dashboard should be 200');
       assert.equal(
         res.headers.get('content-type'),

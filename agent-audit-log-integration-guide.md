@@ -25,7 +25,7 @@
 日志接收地址：https://audit.madebynight.top/v1/ingest
 批量读取地址：https://audit.madebynight.top/v1/audit-logs
 Agent 任务入口：https://audit.madebynight.top/tasks
-审计 Dashboard：https://audit.madebynight.top/dashboard
+审计 Dashboard：https://audit.madebynight.top/
 健康检查地址：https://audit.madebynight.top/health
 ```
 

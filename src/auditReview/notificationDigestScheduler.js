@@ -148,10 +148,7 @@ function dailyDashboardUrl(config) {
   const visualization = config?.auditReview?.visualization ?? {};
   const baseUrl = typeof visualization.baseUrl === 'string' ? visualization.baseUrl.trim() : '';
   if (!baseUrl) return null;
-  const dashboardPath = typeof visualization.dashboardPath === 'string' && visualization.dashboardPath.trim()
-    ? visualization.dashboardPath.trim()
-    : '/dashboard';
-  return `${baseUrl.replace(/\/$/, '')}/${dashboardPath.replace(/^\//, '')}`;
+  return `${baseUrl.replace(/\/$/, '')}/`;
 }
 
 function loadDailySummary(db, { from, to }) {

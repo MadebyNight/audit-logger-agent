@@ -222,7 +222,8 @@ test('dry-run renders one global daily card across agents and traces without out
   const serialized = JSON.stringify(payloads);
   assert.match(serialized, /统计范围/);
   assert.match(serialized, /北京时间/);
-  assert.match(serialized, /audit\.example\.com\/dashboard/);
+  assert.match(serialized, /"default_url":"https:\/\/audit\.example\.com\/"/);
+  assert.doesNotMatch(serialized, /audit\.example\.com\/dashboard/);
   db.close();
 });
 

@@ -85,7 +85,7 @@ GET /health -> 200
 部署和域名生效后，使用：
 
 ```text
-https://<域名>/dashboard
+https://<域名>/
 ```
 
 Dashboard 页面不要求登录，内部用户可以直接查看审计数据并申请 Token。日志读取接口 `/v1/audit-logs` 接受已启用服务账号的 Bearer Token。账号、Token 摘要和 API 访问记录保存在同一 SQLite 数据库的独立表中，随数据卷备份；访问记录不进入审查、通知和日报。
@@ -117,7 +117,9 @@ Dashboard 顶部的“飞书通知正常”状态标识同时作为即时日报�
 
 从 `live` 切换到 `dry-run` 或 `disabled` 时，已有 pending 飞书消息会保留原状态，不发送、不增加尝试次数；恢复 `live` 后继续投递。
 
-外部通知中的 Dashboard 链接由 `AUDIT_AGENT_DASHBOARD_BASE_URL`（优先）或 `auditReview.visualization.baseUrl` 与 `auditReview.visualization.dashboardPath` 生成。Dokploy 应将 `AUDIT_AGENT_DASHBOARD_BASE_URL` 设置为实际的 `https://<域名>`；变量为空时才回退到配置文件，否则飞书卡片会隐藏 Dashboard 操作。
+外部通知的站点基地址使用 `AUDIT_AGENT_DASHBOARD_BASE_URL`（优先）或 `auditReview.visualization.baseUrl`。日报总览链接指向站点根路径 `/`；审查批次和风险详情仍使用 `auditReview.visualization.dashboardPath` 下的详情路径。Dokploy 应将 `AUDIT_AGENT_DASHBOARD_BASE_URL` 设置为实际的 `https://<域名>`；变量为空时才回退到配置文件，否则飞书卡片会隐藏 Dashboard 操作。
+
+历史消息中的 `/dashboard` 和 `/dashboard/`（不带查询参数）会跳转到新版数据看板 `/`。带筛选参数或日报操作结果提示的旧链接继续保留原有视图，风险发现和审查批次详情地址不变。
 
 ## 8. 升级、备份与恢复
 
