@@ -366,6 +366,8 @@ test('failed optional Span migration rolls back and closes its connection', () =
 test('task fields have one strict contract, including purpose on run.start', () => {
   const start = validEntry({ event: 'run.start', requester_id: 'user-1', original_request: 'request', expected_purpose: 'purpose' });
   assert.deepEqual(parseOne(start).errors, []);
+  // Semantic quality is reviewed with task evidence, not rejected by string equality.
+  assert.deepEqual(parseOne({ ...start, expected_purpose: start.original_request }).errors, []);
   for (const field of ['requester_id', 'original_request', 'expected_purpose']) {
     for (const value of [undefined, null, '', '  ']) {
       assertErrorCode(validationErrors({ ...start, [field]: value }), 'missing_required_task_field', field);

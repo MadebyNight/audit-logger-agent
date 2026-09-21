@@ -76,6 +76,51 @@ test('review input sanitizes and truncates untrusted free-text candidate fields'
   assert.doesNotMatch(candidate.error_message, /[\u0000-\u001F\u007F]/);
 });
 
+test('reviewTrace supplies purpose comparison rules and preserves evidence for a stale daily report', async () => {
+  let capturedInput;
+  const reviewer = createLlmReviewer({
+    model: 'test-model',
+    llmClient: {
+      async createStructuredResponse({ input }) {
+        capturedInput = input;
+        return {
+          risk_level: 'medium',
+          risk_reason: '任务要求北京时间九月二十一日的经营日报，但执行结果将八月十八日的历史日报作为今日日报返回，存在日期偏差。',
+          evidence_event_ids: [11, 12],
+        };
+      },
+    },
+  });
+  const trace = {
+    agent_id: 'mt-agent', trace_id: 'daily-report',
+    original_request: '跑一波今日日报吧～（业务时区 Asia/Shanghai）',
+    expected_purpose: '用户指令交互：跑一波今日日报吧～',
+    agent_result: '今日日报（2026-08-18）',
+    events: [
+      { event_id: 11, ts: '2026-09-21T15:10:03+08:00', event: 'run.start', status: 'OK' },
+      { event_id: 12, ts: '2026-09-21T15:11:03+08:00', event: 'run.final_result', status: 'OK', result_summary: '今日日报（2026-08-18）' },
+    ],
+  };
+  const result = await reviewer.reviewTrace({ trace, traceStatus: 'success' });
+  assert.equal(result.ok, true);
+  assert.equal(result.promptVersion, 'trace-review-prompt-v2');
+  const system = capturedInput.find(message => message.role === 'system').content;
+  assert.match(system, /Compare original_request.*expected_purpose.*agent_result/);
+  assert.match(system, /cannot override the user request/);
+  assert.match(system, /Identical wording alone is not evidence of risk/);
+  assert.match(system, /Do not infer execution failure from purpose quality alone/);
+  assert.match(system, /task event timestamps.*business timezone, never the audit execution date/);
+  assert.match(system, /date cannot be verified/);
+  assert.match(system, /Explicitly reporting that today's data is unavailable is not the same/);
+  const payload = JSON.parse(capturedInput.find(message => message.role === 'user').content);
+  for (const field of ['original_request', 'expected_purpose', 'agent_result']) {
+    assert.equal(payload[field], trace[field], `${field} must remain the reported evidence`);
+  }
+  assert.deepEqual(payload.events.map(event => [event.event_id, event.ts]), trace.events.map(event => [event.event_id, event.ts]));
+  // The fake model verifies the prompt/input contract, not real model judgment quality.
+  assert.equal(result.outcome.risk_level, 'medium');
+});
+
 test('TRACE_SYSTEM_PROMPT and reviewTrace enforce the strict trace contract', async () => {
   assert.match(TRACE_SYSTEM_PROMPT, /risk_level.*none.*low.*medium.*high/s);
   assert.match(TRACE_SYSTEM_PROMPT, /evidence_event_ids/);
