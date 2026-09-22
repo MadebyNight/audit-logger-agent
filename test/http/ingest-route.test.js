@@ -489,6 +489,24 @@ test('POST /v1/ingest rejects missing purpose and accepts valid run.start withou
   });
 });
 
+test('POST /v1/ingest accepts requester names and preserves them in storage and spool', async () => {
+  await withIngestServer(async ({ baseUrl, config, db }) => {
+    const event = makeEvent({ event: 'run.start', requester_id: '张三',
+      original_request: '查询任务状态', expected_purpose: '确认任务执行情况' });
+    const response = await fetch(`${baseUrl}/v1/ingest`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(event),
+    });
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { accepted: 1, rejected: 0, errors: [] });
+    const row = db.prepare('SELECT * FROM audit_events').get();
+    assert.equal(row.requester_id, '张三');
+    assert.equal(row.redaction_hits, 0);
+    assert.equal(JSON.parse(row.raw_json).requester_id, '张三');
+    const spooled = readSpool(config, 'remote-agent').trim().split('\n').map(line => JSON.parse(line));
+    assert.equal(spooled[0].requester_id, '张三');
+  });
+});
+
 test('POST /v1/ingest rejects task-field type and length errors regardless of legacy config', async () => {
   const cases = [
     {

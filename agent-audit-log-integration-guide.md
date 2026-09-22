@@ -400,10 +400,16 @@ Agent 任务入口：https://audit.madebynight.top/tasks
 
 | 字段 | 类型与要求 | 事件归属 |
 | --- | --- | --- |
-| `requester_id` | string，1—128 字符；稳定且不可逆脱敏的用户标识 | `run.start` 必填；同一 Trace 后续事件可继承或重复携带 |
+| `requester_id` | string，1—128 字符；行为发起用户的姓名，允许明文保存和展示，无需哈希或匿名化 | `run.start` 必填；同一 Trace 后续事件可继承或重复携带 |
 | `original_request` | string，1—2000 字符；脱敏后的用户原始请求摘要或正文 | `run.start` 必填 |
 | `expected_purpose` | string，1—1000 字符；Agent 理解请求后确定的目标结果、关键范围与成功标准，填写规则见下文 | `run.start` 必填 |
 | `agent_result` | string，1—2000 字符；Agent 最终执行结果或失败摘要 | `run.final_result`、`run.failed` 必填；失败事件填写失败原因 |
+
+**`requester_id` 填写规则**
+
+上游 Agent 将行为发起用户的姓名直接填入 `requester_id`，例如 `"requester_id": "张三"`，同一用户应保持一致写法。这是本平台明确允许的脱敏例外，仅适用于该字段中的发起人姓名；手机号、邮箱、身份证号以及其他字段的脱敏要求继续有效。`user_id` 和 `decision.actor_id` 的脱敏约定不受此例外影响。已有脱敏标识仍可接收，历史数据不会自动转换为姓名。
+
+Dashboard 按同一 Agent 下的 `requester_id` 分组：同名用户会合并，姓名或写法变化会拆成不同用户；从旧标识切换到姓名也会形成新的分组。
 
 **`expected_purpose` 填写规则**
 
@@ -442,7 +448,7 @@ Agent 任务入口：https://audit.madebynight.top/tasks
       "ts": "2026-09-16T08:30:00.000Z", "agent_id": "catalog-agent",
       "trace_id": "request-8ecb", "span_id": "run-1", "event": "run.start",
       "tool_name": "agent.run", "status": "OK", "result_summary": "开始查询商品状态",
-      "requester_id": "user_7f3a", "original_request": "查询商品 761 的当前状态",
+      "requester_id": "张三", "original_request": "查询商品 761 的当前状态",
       "expected_purpose": "读取商品状态并整理查询结果，不修改数据"
     },
     {
@@ -473,7 +479,7 @@ Agent 任务入口：https://audit.madebynight.top/tasks
 - 旧 `product_id` 改为 `entity: { "type": "product", "id": "..." }`；服务端会拒收带 `product_id` 的事件。
 - 不发送 `error.code`；服务端会拒收。错误类别放在 `status`，详细原因放在 `error.message`。
 - 顶层 `error_code` 不属于当前规范。当前服务端未将它列为显式拒收字段，但新改造不得继续使用。
-- 不发送 API Key、Cookie、Token、Authorization、密码、完整请求体、完整响应体、HTML、截图原文或未脱敏个人信息。
+- 不发送 API Key、Cookie、Token、Authorization、密码、完整请求体、完整响应体、HTML、截图原文或未脱敏个人信息；`requester_id` 中的发起人姓名按第 5.2.1 节明确允许明文填写。
 
 服务端默认限制单请求最大 1 MiB，单事件或 NDJSON 单行最大 64 KiB。事件过大时应缩短摘要或只保留稳定实体 ID，不能截断 JSON。
 
