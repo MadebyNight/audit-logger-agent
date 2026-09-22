@@ -19,7 +19,7 @@ function makeDb(databasePath = ':memory:') {
     CREATE TABLE IF NOT EXISTS audit_traces (
       agent_id TEXT NOT NULL, trace_id TEXT NOT NULL, last_event_at TEXT,
       sealed_at TEXT, review_version INTEGER DEFAULT 0, trace_status TEXT DEFAULT 'pending',
-      risk_level TEXT DEFAULT 'unreviewed', original_request TEXT, risk_reason TEXT,
+      risk_level TEXT DEFAULT 'unreviewed', original_request TEXT, risk_reason TEXT, requester_id TEXT,
       PRIMARY KEY(agent_id, trace_id)
     );
     CREATE TABLE IF NOT EXISTS audit_events (
@@ -928,5 +928,30 @@ test('daily buckets use reviewed sealed Traces, never Finding occurrences or unr
     assert.deepEqual(summary.risk_level_counts, { none: 1, low: 1, medium: 1, high: 2 });
     assert.equal(summary.critical_count, 0);
     assert.deepEqual(summary.top_risks.map(row => row.risk_level), ['high', 'high', 'medium']);
+  } finally { db.close(); }
+});
+
+test('daily Agent and requester summaries count tasks across agents and keep unknown identities together', () => {
+  const db = makeDb();
+  try {
+    insertSamples(db);
+    db.exec("UPDATE audit_traces SET requester_id='user-shared' WHERE trace_id='t1'");
+    db.exec(`INSERT INTO audit_traces
+      (agent_id,trace_id,last_event_at,requester_id,sealed_at,review_version,risk_level)
+      VALUES ('a3','pending','2026-07-17T01:40:00.000Z',' ',NULL,2,'high'),
+      ('a3','old','2026-07-15T01:40:00.000Z','excluded','sealed',1,'high')`);
+    const summary = loadDailySummary(db, { from: '2026-07-16T16:00:00.000Z', to: '2026-07-17T02:00:00.000Z' });
+    assert.equal(summary.agent_count, 3, 'include tasks even when they have no events in this window');
+    assert.equal(summary.requester_count, 1, 'same requester across two agents is one person');
+    assert.deepEqual(summary.agents, [
+      { agent_id: 'a1', task_count: 2, risk_count: 1 },
+      { agent_id: 'a2', task_count: 1, risk_count: 1 },
+      { agent_id: 'a3', task_count: 1, risk_count: 0 },
+    ]);
+    assert.deepEqual(summary.requesters, [
+      { requester_id: null, task_count: 2, risk_count: 0 },
+      { requester_id: 'user-shared', task_count: 2, risk_count: 2 },
+    ]);
+    assert.ok(summary.top_risks.every(row => row.requester_id === 'user-shared'));
   } finally { db.close(); }
 });

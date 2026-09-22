@@ -512,10 +512,10 @@ export function buildDailyReportPayloads({
   const errorCount = Number(group.error_count) || 0;
   const agentCount = Number(group.agent_count) || 0;
   const traceCount = Number(group.trace_count) || 0;
-  const toolCount = Number(group.tool_count) || 0;
+  const requesterCount = Number(group.requester_count) || 0;
   const topFindings = findings.slice(0, 3);
   const riskCount = group.risk_level_counts ? group.risk_level_counts.low + group.risk_level_counts.medium + group.risk_level_counts.high : highRiskCount;
-  const topTools = toolEntries(group.tools).slice(0, 5);
+
   const conclusion = highRiskCount > 0
       ? `存在 ${highRiskCount} 条高风险，建议关注相关业务链路。`
       : group.risk_level_counts && riskCount > 0
@@ -529,72 +529,152 @@ export function buildDailyReportPayloads({
           : '统计窗口内暂无审计事件。';
   const generated = beijingParts(window?.to ?? generatedAt);
   const slotLabel = generated ? `${generated.hour}:${generated.minute}` : '定时时段';
-  const elements = [
-    {
-      tag: 'markdown',
-      content: `**总体判断**\n${conclusion}`,
-    },
-    metricElement([
-      { label: '事件数', value: String(eventCount) },
-      { label: '异常事件数', value: String(errorCount) },
-      { label: '高风险 Trace 数', value: String(highRiskCount) },
-    ]),
-    metricElement(['success', 'failed', 'interrupted', 'incomplete'].map((key, index) => ({
-      label: ['成功', '失败', '中断', '不完整'][index], value: String(group.trace_status_counts?.[key] ?? 0),
+  // JSON 2.0 native typography and containers; separate blocks avoid soft-break collapse.
+  // Official references (checked 2026-09-21):
+  // https://open.feishu.cn/document/feishu-cards/card-json-v2-structure
+  // https://open.feishu.cn/document/feishu-cards/card-json-v2-components/containers/column-set
+  // https://open.feishu.cn/document/feishu-cards/card-json-v2-components/content-components/rich-text
+  // https://open.feishu.cn/document/feishu-cards/card-json-v2-components/interactive-components/button
+  const text = (content, size = 'normal', align = 'left') => ({
+    tag: 'markdown', content, text_size: size, text_align: align,
+  });
+  const metrics = (items, prominent = false) => ({
+    tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px',
+    columns: items.map(({ label, value, color = 'blue' }) => ({
+      tag: 'column', width: 'weighted', weight: 1,
+      ...(prominent ? { background_style: 'report_surface', padding: '12px 4px' } : {}),
+      vertical_spacing: '4px',
+      elements: [
+        text(`<font color='${Number(value) > 0 ? color : 'grey'}'>**${sanitizeFeishuText(value)}**</font>`, prominent ? 'heading-1' : 'heading-3', 'center'),
+        text(`<font color='grey'>${label}</font>`, 'notation', 'center'),
+      ],
+    })),
+  });
+  const peopleSection = (title, rows, identityField, fallback, role, color, surface) => {
+    if (!rows.length) return [];
+    const tableRow = (name, tasks, risks, header = false) => ({
+      tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', background_style: surface,
+      columns: [
+        { tag: 'column', width: 'weighted', weight: 4, elements: [text(header ? `<font color='grey'>${name}</font>` : name, header ? 'notation' : 'normal')] },
+        { tag: 'column', width: 'weighted', weight: 1, elements: [text(header ? `<font color='grey'>${tasks}</font>` : `**${tasks}**`, 'notation', 'right')] },
+        { tag: 'column', width: 'weighted', weight: 1, elements: [text(`<font color='${!header && Number(risks) > 0 ? 'orange' : 'grey'}'>${risks}</font>`, 'notation', 'right')] },
+      ],
+    });
+    return [{
+      tag: 'column_set', flex_mode: 'none', columns: [{
+        tag: 'column', width: 'weighted', weight: 1, background_style: surface, padding: '12px', vertical_spacing: '12px',
+        elements: [
+          text(`<text_tag color='${color}'>${role}</text_tag> **${title}**`, 'heading'),
+          text(`<font color='grey'>按任务数排序 · 展示前 ${rows.length} 项</font>`, 'notation'),
+          tableRow(identityField === 'agent_id' ? 'Agent' : '发起人', '任务', '风险', true),
+          ...rows.map(row => tableRow(shortenIdentity(row[identityField] || fallback, 48), Number(row.task_count) || 0, Number(row.risk_count) || 0)),
+        ],
+      }],
+    }];
+  };
+  const detailElements = [
+    text('**总体判断**', 'heading'),
+    text(conclusion),
+    metrics([
+      { label: 'Agent', value: agentCount },
+      { label: '已知发起人', value: requesterCount },
+      { label: '任务数', value: traceCount },
+    ], true),
+    text('**任务状态**', 'heading'),
+    metrics(['success', 'failed', 'interrupted', 'incomplete'].map((key, index) => ({
+      label: ['成功', '失败', '中断', '不完整'][index], value: group.trace_status_counts?.[key] ?? 0,
+      color: ['green', 'red', 'orange', 'grey'][index],
     }))),
-    metricElement(['none', 'low', 'medium', 'high'].map((key, index) => ({
-      label: ['无风险', '低风险', '中风险', '高风险'][index], value: String(group.risk_level_counts?.[key] ?? 0),
+    text('**风险分布**', 'heading'),
+    metrics(['none', 'low', 'medium', 'high'].map((key, index) => ({
+      label: ['无风险', '低风险', '中风险', '高风险'][index], value: group.risk_level_counts?.[key] ?? 0,
+      color: ['green', 'blue', 'orange', 'red'][index],
     }))),
-    {
-      tag: 'markdown',
-      content: `**覆盖范围**\n覆盖 ${agentCount} 个 Agent · ${traceCount} 条 Trace · ${toolCount} 类工具`,
-    },
-    ...(topFindings.length > 0 ? [{
-      tag: 'markdown',
-      content: [
-        `**Top 风险（展示 ${topFindings.length}/${riskCount}）**`,
-        ...topFindings.map((finding, index) => {
-          const title = sanitizeBusinessText(
-            finding.title || finding.tool_name || finding.category || '未命名风险',
-          );
-          return [
-            `${index + 1}. ${severityLabelMarkdown(finding.severity)}${truncateText(title, 72)}`,
-            `Agent：${shortenIdentity(finding.agent_id)} · Trace：${shortenIdentity(finding.trace_id)}`,
-            truncateText(finding.summary, 100),
-          ].join('\n');
-        }),
-      ].join('\n\n'),
-    }] : []),
-    ...(topTools.length > 0 ? [{
-      tag: 'markdown',
-      content: [
-        `**Top 工具（展示 ${topTools.length}/${toolCount}）**`,
-        ...topTools.map((tool, index) => `${index + 1}. ${truncateText(tool.title, 72)}：${tool.summary}`),
-      ].join('\n'),
-    }] : []),
+    { tag: 'hr' },
+    ...peopleSection('Agent 概览', (group.agents ?? []).slice(0, 5), 'agent_id', 'Agent 未知', '执行侧', 'blue', 'report_agents'),
+    ...peopleSection('发起人概览', (group.requesters ?? []).slice(0, 5), 'requester_id', '发起人未知', '发起侧', 'purple', 'report_requesters'),
+    ...(topFindings.length > 0 ? [
+      text(`**Top 风险** <font color='grey'>展示 ${topFindings.length}/${riskCount}</font>`, 'heading'),
+      ...topFindings.map((finding, index) => {
+        const severity = finding.severity === 'medium' ? '中风险' : finding.severity === 'low' ? '低风险' : '高风险';
+        const color = finding.severity === 'medium' ? 'orange' : finding.severity === 'low' ? 'blue' : 'red';
+        return {
+          tag: 'column_set', flex_mode: 'none', columns: [{
+            tag: 'column', width: 'weighted', weight: 1, background_style: 'report_surface',
+            padding: '12px', vertical_spacing: '8px', elements: [
+              text(`<text_tag color='${color}'>［${severity}］</text_tag> <font color='grey'>${String(index + 1).padStart(2, '0')}</font>`, 'notation'),
+              text(`**${truncateText(sanitizeBusinessText(finding.title || finding.tool_name || finding.category || '未命名风险'), 72)}**`),
+              text(truncateText(finding.summary, 100)),
+              text(`<font color='grey'>Agent：${shortenIdentity(finding.agent_id)}</font>`, 'notation'),
+              text(`<font color='grey'>发起人：${sanitizeFeishuText(finding.requester_id || '发起人未知').slice(0, 128)}</font>`, 'notation'),
+              text(`<font color='grey'>Trace：${shortenIdentity(finding.trace_id)}</font>`, 'notation'),
+            ],
+          }],
+        };
+      }),
+    ] : []),
+    { tag: 'hr' },
     metadataElement([
+      `覆盖 ${agentCount} 个 Agent · ${traceCount} 条 Trace · ${requesterCount} 位已知发起人`,
+      '风险列：已审查的低／中／高风险任务数；未知身份不计入已知发起人数。',
+      `事件总数：${eventCount} · 异常事件：${errorCount}`,
       `统计范围：${formatBeijingRange(window?.from, window?.to ?? generatedAt, { prefix: '' })} · 北京时间`,
       `统计日期：${sanitizeFeishuText(date || '未知')}`,
       '报告范围：全部 Agent 与业务链路',
     ].join('\n')),
+  ];
+  const leadingPeople = [
+    { title: '主要 Agent', row: group.agents?.[0], field: 'agent_id', fallback: 'Agent 未知', surface: 'report_agents' },
+    { title: '主要发起人', row: group.requesters?.[0], field: 'requester_id', fallback: '发起人未知', surface: 'report_requesters' },
+  ].filter(item => item.row);
+  const elements = [
+    ...detailElements.slice(0, 3),
+    ...(leadingPeople.length ? [{
+      tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px',
+      columns: leadingPeople.map(({ title, row, field, fallback, surface }) => ({
+        tag: 'column', width: 'weighted', weight: 1, background_style: surface, padding: '8px', vertical_spacing: '4px',
+        elements: [
+          text(`**${title}** <font color='grey'>任务最多</font>`, 'notation'),
+          text(shortenIdentity(row[field] || fallback, 20), 'notation'),
+          text(`任务 **${Number(row.task_count) || 0}** · 风险 <font color='${row.risk_count > 0 ? 'orange' : 'grey'}'>${Number(row.risk_count) || 0}</font>`, 'notation'),
+        ],
+      })),
+    }] : []),
+    ...(topFindings.length ? [text(`**重点风险** · ${truncateText(sanitizeBusinessText(topFindings[0].title || '未命名风险'), 40)}`, 'notation')] : []),
   ];
   const detailUrl = safeHttpUrl(dashboardUrl);
   if (detailUrl) {
     elements.push({
       tag: 'button',
       text: { tag: 'plain_text', content: '查看完整日报' },
-      type: 'primary',
-      width: 'default',
+      type: 'primary_filled',
+      width: 'fill',
+      size: 'large',
       behaviors: [{ type: 'open_url', default_url: detailUrl }],
     });
   }
+  elements.push({
+    tag: 'collapsible_panel', expanded: false,
+    header: { title: { tag: 'plain_text', content: '展开 Agent、发起人及审计明细' }, vertical_align: 'center' },
+    border: { color: 'grey', corner_radius: '5px' }, padding: '8px', vertical_spacing: '8px',
+    elements: detailElements.slice(3),
+  });
   const payload = baseCard({
     title: '审计信息日报',
-    subtitle: `全局汇总 · ${slotLabel}`,
+    subtitle: `全局汇总 · ${slotLabel} · ${sanitizeFeishuText(date || '日期未知')}`,
     template: 'blue',
     preview: '审计日报：全局汇总',
     elements,
   });
+  payload.card.config.width_mode = 'compact';
+  payload.card.config.style = { color: {
+    report_surface: { light_mode: 'rgba(245,247,250,1)', dark_mode: 'rgba(40,44,52,1)' },
+    report_agents: { light_mode: 'rgba(240,245,255,1)', dark_mode: 'rgba(30,42,61,1)' },
+    report_requesters: { light_mode: 'rgba(247,243,255,1)', dark_mode: 'rgba(43,36,58,1)' },
+  } };
+  payload.card.header.padding = '16px';
+  payload.card.body.padding = '16px';
+  payload.card.body.vertical_spacing = '8px';
   if (utf8Bytes(payload) > byteLimit) {
     throw new Error('Feishu daily report exceeds configured payload byte limit');
   }

@@ -255,6 +255,9 @@ test('daily report produces one global management overview across agents and tra
       error_count: 3,
       tool_count: 7,
       agent_count: 3,
+      requester_count: 2,
+      agents: [{ agent_id: '业务助手', task_count: 5, risk_count: 4 }],
+      requesters: [{ requester_id: 'user-1', task_count: 4, risk_count: 3 }, { requester_id: null, task_count: 1, risk_count: 1 }],
       trace_count: 5,
       tools: [
         { tool_name: 'db.read', total: 18, error_count: 0 },
@@ -278,19 +281,37 @@ test('daily report produces one global management overview across agents and tra
   const serialized = JSON.stringify(payload);
   assert.equal(payload.card.header.template, 'blue');
   assert.match(serialized, /覆盖 3 个 Agent · 5 条 Trace/);
-  assert.match(serialized, /\*\*42\*\*\\n事件数/);
-  assert.match(serialized, /\*\*3\*\*\\n异常事件数/);
-  assert.match(serialized, /\*\*4\*\*\\n高风险 Trace 数/);
+  const metrics = payload.card.body.elements.find(element => element.tag === 'column_set');
+  assert.deepEqual(metrics.columns.map(column => column.elements[0].content.match(/\*\*(\d+)\*\*/)[1]), ['3', '2', '5']);
+  assert.deepEqual(metrics.columns.map(column => column.elements[1].content), ["<font color='grey'>Agent</font>", "<font color='grey'>已知发起人</font>", "<font color='grey'>任务数</font>"]);
+  assert.ok(metrics.columns.every(column => column.elements[0].text_size === 'heading-1'));
+  assert.ok(metrics.columns.every(column => column.background_style === 'report_surface'));
+  assert.ok(payload.card.config.style.color.report_surface.dark_mode);
+  assert.equal(payload.card.config.width_mode, 'compact');
+  const details = payload.card.body.elements.find(element => element.tag === 'collapsible_panel');
+  assert.equal(details.expanded, false);
+  assert.ok(payload.card.body.elements.findIndex(element => element.tag === 'button') < payload.card.body.elements.indexOf(details));
+  const panels = details.elements.filter(element => element.tag === 'column_set' && element.columns.length === 1);
+  const riskCards = panels.filter(element => element.columns[0].background_style === 'report_surface');
+  for (const surface of ['report_agents', 'report_requesters']) {
+    assert.ok(panels.some(element => element.columns[0].background_style === surface));
+    assert.notEqual(payload.card.config.style.color[surface].light_mode, payload.card.config.style.color[surface].dark_mode);
+    const panel = panels.find(element => element.columns[0].background_style === surface);
+    assert.equal(panel.columns[0].elements[2].columns.length, 3);
+  }
+  assert.equal(riskCards.length, 3);
+  assert.equal(riskCards[0].columns[0].elements.length, 6, 'risk title, summary, agent and requester must remain separate blocks');
   for (const expected of ['权限异常', '写入异常', '外发异常']) assert.match(serialized, new RegExp(expected));
   assert.doesNotMatch(serialized, /ignored-fourth/);
-  for (const expected of ['db.write', 'shell.exec', 'db.read', 'file.read', 'cache.get']) {
-    assert.match(serialized, new RegExp(expected.replaceAll('.', '\\.')));
-  }
+  assert.doesNotMatch(serialized, /Top 工具|db\.write|shell\.exec|db\.read|file\.read|cache\.get/);
+  for (const expected of ['Agent 概览', '发起人概览', 'user-1', '发起人未知']) assert.ok(serialized.includes(expected));
   assert.doesNotMatch(serialized, /ignored\.sixth/);
   assert.doesNotMatch(serialized, /agent_id|trace_id|agent-daily|trace-daily/);
   assert.doesNotMatch(serialized, /高风险名称与摘要|工具调用统计/);
   assert.doesNotMatch(serialized, /"tag":"note"/);
   assert.equal(payload.card.body.elements.filter((element) => element.tag === 'button').length, 1);
+  assert.equal(payload.card.body.elements.find(element => element.tag === 'button').type, 'primary_filled');
+  assert.equal(payload.card.body.elements.find(element => element.tag === 'button').width, 'fill');
   assert.match(serialized, /查看完整日报/);
 });
 
@@ -409,6 +430,9 @@ test('oversized daily input stays one compact card below byte and component limi
     group: {
       scope: 'global',
       agent_count: 120,
+      requester_count: 80,
+      agents: Array.from({ length: 120 }, (_, i) => ({ agent_id: `agent-${i}-` + '长标识'.repeat(80), task_count: 20, risk_count: 2 })),
+      requesters: Array.from({ length: 80 }, (_, i) => ({ requester_id: `user-${i}-` + '长标识'.repeat(80), task_count: 10, risk_count: 1 })),
       trace_count: 600,
       event_count: 999,
       error_count: 20,
@@ -491,7 +515,7 @@ test('daily conclusion does not describe unreviewed or medium-risk Traces as nor
     { event_count: 2, trace_count: 1, reviewed_trace_count: 1, risk_level_counts: { none: 0, low: 0, medium: 1, high: 0 } },
   ]) {
     const payload = buildDailyReportPayloads({ group: { ...group, top_risks: [] } })[0];
-    const conclusion = payload.card.body.elements[0].content;
+    const conclusion = payload.card.body.elements[1].content;
     assert.doesNotMatch(conclusion, /整体运行正常/);
     assert.match(conclusion, /尚未形成收敛结论|中风险/);
   }

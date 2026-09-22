@@ -179,6 +179,8 @@ function loadDailySummary(db, { from, to }) {
   // Match the Dashboard's task time axis; each composite Trace key counts once.
   const traces = db.prepare(`
     SELECT COUNT(*) AS trace_count,
+      COUNT(DISTINCT agent_id) AS agent_count,
+      COUNT(DISTINCT NULLIF(TRIM(requester_id), '')) AS requester_count,
       SUM(CASE WHEN sealed_at IS NOT NULL AND review_version > 0 THEN 1 ELSE 0 END) AS reviewed_trace_count
     FROM audit_traces WHERE last_event_at >= @from AND last_event_at <= @to
   `).get({ from, to });
@@ -196,7 +198,7 @@ function loadDailySummary(db, { from, to }) {
     if (Object.hasOwn(riskLevelCounts, row.risk_level)) riskLevelCounts[row.risk_level] += row.count;
   }
   const topRisks = db.prepare(`
-    SELECT agent_id, trace_id, risk_level, trace_status,
+    SELECT agent_id, trace_id, requester_id, risk_level, trace_status,
       risk_level AS severity, original_request AS title, risk_reason AS summary,
       last_event_at AS observed_at
     FROM audit_traces
@@ -207,11 +209,27 @@ function loadDailySummary(db, { from, to }) {
     LIMIT 3
   `).all({ from, to });
 
+  const agentSummaries = db.prepare(`
+    SELECT agent_id, COUNT(*) AS task_count,
+      SUM(CASE WHEN sealed_at IS NOT NULL AND review_version > 0 AND risk_level IN ('low','medium','high') THEN 1 ELSE 0 END) AS risk_count
+    FROM audit_traces WHERE last_event_at >= @from AND last_event_at <= @to
+    GROUP BY agent_id ORDER BY task_count DESC, agent_id ASC LIMIT 5
+  `).all({ from, to });
+  const requesterSummaries = db.prepare(`
+    SELECT NULLIF(TRIM(requester_id), '') AS requester_id, COUNT(*) AS task_count,
+      SUM(CASE WHEN sealed_at IS NOT NULL AND review_version > 0 AND risk_level IN ('low','medium','high') THEN 1 ELSE 0 END) AS risk_count
+    FROM audit_traces WHERE last_event_at >= @from AND last_event_at <= @to
+    GROUP BY NULLIF(TRIM(requester_id), '') ORDER BY task_count DESC, requester_id ASC LIMIT 5
+  `).all({ from, to });
+
   return {
     scope: 'global',
     event_count: Number(summary?.event_count) || 0,
     error_count: Number(summary?.error_count) || 0,
-    agent_count: Number(summary?.agent_count) || 0,
+    agent_count: Number(traces?.agent_count) || 0,
+    requester_count: Number(traces?.requester_count) || 0,
+    agents: agentSummaries,
+    requesters: requesterSummaries,
     trace_count: Number(traces?.trace_count) || 0,
     tool_count: Number(summary?.tool_count) || 0,
     reviewed_trace_count: Number(traces?.reviewed_trace_count) || 0,
