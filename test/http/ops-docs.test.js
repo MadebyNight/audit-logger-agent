@@ -86,7 +86,7 @@ test('Dokploy deployment guide covers required deployment, security, and recover
     '/health',
     'TLS',
     '/v1/ingest',
-    'https://<域名>/dashboard',
+    'https://<域名>/',
     'auditReview.visualization.baseUrl',
     'callback',
     '备份',

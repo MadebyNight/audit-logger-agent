@@ -365,7 +365,10 @@ test('real server entrypoint renders stored post-audit tasks and Trace detail ta
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assert.ok(ready, `server did not start: ${output}`);
-    for (const route of ['/', `/dashboard/agents/entry-agent/traces/${encodeURIComponent('entry/trace#1')}`]) {
+    const homepage = await fetch(`${base}/`);
+    assert.equal(homepage.status, 200);
+    assert.match(await homepage.text(), /数据看板/);
+    for (const route of ['/tasks', `/dashboard/agents/entry-agent/traces/${encodeURIComponent('entry/trace#1')}`]) {
       const response = await fetch(`${base}${route}`);
       assert.equal(response.status, 200, `real entrypoint response for ${route}`);
       const html = await response.text();
